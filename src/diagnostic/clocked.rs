@@ -65,7 +65,7 @@ pub(crate) fn error(
             ClockedEndpointError::Allocation => format!("{site} 配線の配置表を確保できない。"),
             ClockedEndpointError::Layout => format!("{site} 定義のビット配置が一致しない。"),
             ClockedEndpointError::Unsupported(at) => format!(
-                "{} 定義の右辺には信号名か、基底 NOR、ラッチ、RAM の直接呼び出しを指定する。",
+                "{} 定義の右辺には信号名、ビット選択、または基底 NOR・ラッチ・RAM の直接呼び出しを指定する。",
                 located(&at),
             ),
             ClockedEndpointError::AliasBits { reference, reason } => {
@@ -278,7 +278,7 @@ fn module_expression(site: &str, error: ModuleSelectionsError<'_, '_>) -> String
 /// Core が返した閉路順に、最初の参照位置と残りの関連位置を表示する。
 fn alias_cycle(fallback: &str, mut locations: impl Iterator<Item = String>) -> String {
     let first = locations.next().unwrap_or_else(|| fallback.to_owned());
-    let mut message = format!("{first} 信号の直結だけで循環している。");
+    let mut message = format!("{first} 配線参照だけで循環している。");
     for location in locations {
         message.push_str(&format!("\n  循環内の参照 {location}"));
     }

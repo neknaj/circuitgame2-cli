@@ -323,6 +323,13 @@ fn run_describes_selection_range_and_port_width_in_call_arguments() {
     );
 }
 
+fn fixture_location(path: &str, expression: &str, operand: &str) -> String {
+    let absolute = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path);
+    let text = fs::read_to_string(absolute).unwrap();
+    let start = text.find(expression).unwrap() + expression.find(operand).unwrap();
+    format!("{path} [{start}..{}]", start + operand.len())
+}
+
 #[test]
 fn run_reports_every_reference_in_a_cycle_across_module_parts() {
     let owner = "tests/fixtures/clocked.ncg2";
@@ -332,14 +339,35 @@ fn run_reports_every_reference_in_a_cycle_across_module_parts() {
     assert!(failure.stdout.is_empty());
 
     let stderr = String::from_utf8(failure.stderr).unwrap();
-    let location = |path: &str, definition: &str| {
-        let absolute = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path);
-        let text = fs::read_to_string(absolute).unwrap();
-        let start = text.find(definition).unwrap() + definition.len() - 2;
-        format!("{path} [{start}..{}]", start + 1)
-    };
-    assert!(stderr.contains("信号の直結だけで循環している"), "{stderr}");
-    assert!(stderr.contains(&location(owner, "(def x y)")), "{stderr}");
-    assert!(stderr.contains(&location(part, "(def y x)")), "{stderr}");
+    assert!(stderr.contains("配線参照だけで循環している"), "{stderr}");
+    assert!(
+        stderr.contains(&fixture_location(owner, "(def x y)", "y")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&fixture_location(part, "(def y x)", "x")),
+        "{stderr}"
+    );
+    assert!(stderr.contains("循環内の参照"), "{stderr}");
+}
+
+#[test]
+fn run_reports_the_selected_operands_in_a_cycle_across_module_parts() {
+    let owner = "tests/fixtures/clocked.ncg2";
+    let part = "tests/fixtures/cycle-part.ncg2";
+    let failure = cli(&["run", "--entry", "::tests::selection-cycle", owner, part]);
+    assert_eq!(failure.status.code(), Some(1));
+    assert!(failure.stdout.is_empty());
+
+    let stderr = String::from_utf8(failure.stderr).unwrap();
+    assert!(stderr.contains("配線参照だけで循環している"), "{stderr}");
+    assert!(
+        stderr.contains(&fixture_location(owner, "(bit right 0)", "right")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&fixture_location(part, "(slice left 0 1)", "left")),
+        "{stderr}"
+    );
     assert!(stderr.contains("循環内の参照"), "{stderr}");
 }

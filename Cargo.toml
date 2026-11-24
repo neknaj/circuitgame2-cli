@@ -12,4 +12,4 @@ name = "circuitgame2"
 path = "src/main.rs"
 
 [dependencies]
-circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "b89aa2ed1dfc66b2e11581448ff772a13febc216" }
+circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "e43ef6743f011bdfe9ec205ed2a5bd4c1fe437fd" }

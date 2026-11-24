@@ -6,4 +6,6 @@
   (module capacity (in (a (bits 64)) d we) (out q)
     (def q (bank a d we)))
   (module bad-slice (in x) (out y))
-  (module cycle (in) (out x) (def x y)))
+  (module cycle (in) (out x) (def x y))
+  (module selection-cycle (in) (out left)
+    (def left (bit right 0))))

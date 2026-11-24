@@ -1,3 +1,5 @@
 (namespace tests
   (module-part cycle
-    (def y x)))
+    (def y x))
+  (module-part selection-cycle
+    (def right (slice left 0 1))))
