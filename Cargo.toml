@@ -3,7 +3,7 @@ name = "circuitgame2-cli"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
-description = "NCG2 の回路ソースを検査し、組み合わせ関数を評価する CLI"
+description = "NCG2 の回路ソースを検査し、組み合わせ関数と順序回路を実行する CLI"
 license = "MIT"
 repository = "https://github.com/neknaj/circuitgame2-cli"
 
@@ -12,4 +12,4 @@ name = "circuitgame2"
 path = "src/main.rs"
 
 [dependencies]
-circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "cc29152bfd7b265193113232d83aab0bf5ad230d" }
+circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "ff2532e6bef71b5e72a4c8843ce27cab8ba86e94" }

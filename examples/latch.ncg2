@@ -1,0 +1,7 @@
+(using nor)
+(latch hold (width 1))
+(module main
+  (in d we)
+  (out q previous-clear)
+  (def q (hold d we))
+  (def previous-clear (nor q 0)))

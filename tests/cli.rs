@@ -47,6 +47,7 @@ fn bad_inputs_exit_with_an_error_and_no_result() {
         ("::missing", "00", "宣言が見つからない"),
         ("gate", "00", "完全修飾名"),
         ("::gate", "0", "2 ビット必要"),
+        ("::gate", "x", "2 ビット必要"),
         ("::gate", "0x", "0 と 1"),
     ] {
         let output = cli(&[
@@ -126,4 +127,130 @@ fn namespace_selection_and_diagnostics_preserve_file_boundaries() {
     let stderr = String::from_utf8(missing.stderr).unwrap();
     assert!(stderr.contains("invalid.ncg2 ["));
     assert!(stderr.contains("unknown が見つからない"));
+}
+
+#[test]
+fn readme_latch_example_reports_reset_and_each_tick() {
+    let trace = cli(&[
+        "run",
+        "--input",
+        "11",
+        "--input",
+        "00",
+        "examples/latch.ncg2",
+    ]);
+    assert!(
+        trace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trace.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(trace.stdout).unwrap(),
+        "0 00\n1 11\n2 10\n"
+    );
+    assert!(trace.stderr.is_empty());
+
+    let reset = cli(&["run", "examples/latch.ncg2"]);
+    assert!(
+        reset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    assert_eq!(String::from_utf8(reset.stdout).unwrap(), "0 00\n");
+}
+
+#[test]
+fn run_rejects_a_bad_later_frame_before_reporting_a_trace() {
+    for (frame, reason) in [("0", "2 ビット必要"), ("0x", "0 と 1")] {
+        let invalid = cli(&[
+            "run",
+            "--input",
+            "11",
+            "--input",
+            frame,
+            "examples/latch.ncg2",
+        ]);
+        assert_eq!(invalid.status.code(), Some(1));
+        assert!(invalid.stdout.is_empty());
+        let stderr = String::from_utf8(invalid.stderr).unwrap();
+        assert!(stderr.contains("tick 2"));
+        assert!(stderr.contains(reason));
+    }
+
+    let invalid = cli(&["run", "--entry", "::gate", "examples/nor.ncg2"]);
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(invalid.stdout.is_empty());
+    assert!(
+        String::from_utf8(invalid.stderr)
+            .unwrap()
+            .contains("module を指す")
+    );
+}
+
+#[test]
+fn run_accepts_empty_frames_for_an_entry_without_inputs() {
+    let trace = cli(&[
+        "run",
+        "--entry",
+        "::tests::oscillator",
+        "--input=",
+        "--input=",
+        "tests/fixtures/clocked.ncg2",
+    ]);
+    assert!(
+        trace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trace.stderr)
+    );
+    assert_eq!(String::from_utf8(trace.stdout).unwrap(), "0 0\n1 1\n2 0\n");
+}
+
+#[test]
+fn run_reports_the_ram_call_that_exceeds_the_memory_limit() {
+    let failure = cli(&[
+        "run",
+        "--entry",
+        "::tests::capacity",
+        "tests/fixtures/clocked.ncg2",
+    ]);
+    assert_eq!(failure.status.code(), Some(1));
+    assert!(failure.stdout.is_empty());
+    let stderr = String::from_utf8(failure.stderr).unwrap();
+    assert!(stderr.contains("記憶領域が容量上限を超える"));
+    let text = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/clocked.ncg2"),
+    )
+    .unwrap();
+    let call = "(bank a d we)";
+    let offset = text.find(call).unwrap();
+    assert!(
+        stderr.contains(&format!(
+            "tests/fixtures/clocked.ncg2 [{offset}..{}]",
+            offset + call.len()
+        )),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn reports_the_slice_range_in_the_source_fragment() {
+    let failure = cli(&[
+        "run",
+        "--entry",
+        "::tests::bad-slice",
+        "tests/fixtures/clocked.ncg2",
+        "tests/fixtures/slice-part.ncg2",
+    ]);
+    assert_eq!(failure.status.code(), Some(1));
+    assert!(failure.stdout.is_empty());
+    let stderr = String::from_utf8(failure.stderr).unwrap();
+    assert!(
+        stderr.contains("tests/fixtures/slice-part.ncg2 ["),
+        "{stderr}"
+    );
+    assert!(stderr.contains("添字 5..5 が入力幅 1 ビット"), "{stderr}");
+    assert!(
+        stderr.contains("入力の幅 tests/fixtures/clocked.ncg2 ["),
+        "{stderr}"
+    );
 }

@@ -1,0 +1,8 @@
+(using nor)
+(namespace tests
+  (module oscillator (in) (out q)
+    (def q (nor q q)))
+  (memory bank (address 64) (data (bits 1)))
+  (module capacity (in (a (bits 64)) d we) (out q)
+    (def q (bank a d we)))
+  (module bad-slice (in x) (out y)))

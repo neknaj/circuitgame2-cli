@@ -1,5 +1,7 @@
 //! core の診断と関連箇所を端末向けに表示する。
 
+pub(super) mod clocked;
+
 use std::{
     io::{self, Write},
     ops::Range,
