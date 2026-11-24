@@ -2,22 +2,26 @@
 
 NCG2 の回路ソースをコマンドラインで検査し、組み合わせ関数を評価する。
 
-## NOR を試す
+ラッチや RAM を含む順序回路を動かすには、開発版のインストール手順を使う。[順序回路に対応した開発版の README](https://github.com/neknaj/circuitgame2-cli/tree/c88e49df1d1beb5f644d595b689c8d99d01c7f9e#readme)
+
+## インストールして NOR を試す
 
 Rustup と Git を用意し、次のコマンドを実行する。[ツールチェーン](rust-toolchain.toml)は Rust 1.99.1 を指定する。
 
 ```sh
 git clone https://github.com/neknaj/circuitgame2-cli.git
 cd circuitgame2-cli
-cargo run --quiet --locked -- check examples/nor.ncg2
-cargo run --quiet --locked -- eval --func ::gate --input 00 examples/nor.ncg2
+cargo install --path . --locked
+circuitgame2 --version
+circuitgame2 check examples/nor.ncg2
+circuitgame2 eval --func ::gate --input 00 examples/nor.ncg2
 ```
+
+`circuitgame2` が見つからない場合は、Cargo が表示した実行ファイルの保存先を `PATH` に加える。
 
 [例題](examples/nor.ncg2)の検査に成功すると `検査成功（1 ファイル）` と表示される。`eval` は `::gate` に 0 と 0 を入力し、NOR の出力 `1` を表示する。`--input 01` では `0` が返る。
 
 ## 自分のファイルを使う
-
-CLI リポジトリのルートで `cargo install --path . --locked` を実行すると、`circuitgame2` コマンドをインストールできる。
 
 回路プロジェクトのルートへ移動し、使う UTF-8 の `.ncg2` ファイルを相対パスで並べる。プロジェクト全体で `(using nor)` を一つ指定する。
 
