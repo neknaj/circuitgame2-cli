@@ -116,8 +116,11 @@ fn reference_error(error: DefinitionBatchError<'_, '_>) -> String {
         &error.site.source.id.components().join("/"),
         &error.site.name.span,
     );
-    let name = error.site.name.word;
-    match error.reason {
+    reference_reason(&at, error.site.name.word, error.reason)
+}
+
+fn reference_reason(at: &str, name: &str, reason: DefinitionReferenceReason<'_, '_>) -> String {
+    match reason {
         DefinitionReferenceReason::Missing => format!("{at} {name} が見つからない。"),
         DefinitionReferenceReason::MissingPrefix => {
             format!("{at} {name} の先頭の名前を解決できない。")

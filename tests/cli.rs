@@ -186,6 +186,30 @@ fn readme_ram_example_reports_the_previous_value_at_the_selected_address() {
 }
 
 #[test]
+fn readme_hierarchy_ram_example_keeps_the_two_instances_independent() {
+    let trace = cli(&[
+        "run",
+        "--input",
+        "11100",
+        "--input",
+        "10111",
+        "--input",
+        "10000",
+        "examples/hierarchy-ram.ncg2",
+    ]);
+    assert!(
+        trace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trace.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(trace.stdout).unwrap(),
+        "0 00\n1 00\n2 10\n3 01\n"
+    );
+    assert!(trace.stderr.is_empty());
+}
+
+#[test]
 fn run_rejects_a_bad_later_frame_before_reporting_a_trace() {
     for (frame, reason) in [("0", "2 ビット必要"), ("0x", "0 と 1")] {
         let invalid = cli(&[

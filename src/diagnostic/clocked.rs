@@ -1,20 +1,25 @@
 //! 順序回路のコンパイル診断を、元のソース範囲に結び付けて表示する。
 
 use circuitgame2_core::{
-    netlist::{ClockedStorageError, ClockedVmError, StateAllocationError},
+    netlist::{
+        ClockedInstanceError, ClockedNorError, ClockedStorageError, ClockedVmError, GateInput,
+        StateAllocationError,
+    },
     project::{
         BitSelectionError, CallInputReason, CircuitLiteralWidthError, CircuitProject,
         ClockedArgumentWiringError, ClockedDefinitionLayoutError, ClockedDriverBitsError,
-        ClockedEndpointError, ClockedModuleOutputsError, ClockedModuleVmError,
-        ClockedStorageLayoutError, ConcatResultWidthError, ConcatWidthError, ModuleAliasTypesError,
-        ModuleBodyPosition, ModuleCallInputsError, ModuleCallPortsError, ModuleCallsError,
-        ModuleConcatsError, ModuleDriverError, ModuleOutputTypesError, ModuleRootTypesError,
-        ModuleSelectionsError, ModuleWiringError, OutputDriver, ResolvedPortType,
-        SelectionArgumentError,
+        ClockedEndpointError, ClockedModuleError, ClockedModuleOutputsError, ClockedModuleVmError,
+        ClockedStorageLayoutError, ConcatResultWidthError, ConcatWidthError, LocatedName,
+        ModuleAliasTypesError, ModuleBodyPosition, ModuleCallInputsError, ModuleCallPortsError,
+        ModuleCallsError, ModuleConcatsError, ModuleDriverError, ModuleOutputTypesError,
+        ModuleRootTypesError, ModuleSelectionsError, ModuleWiringError, OutputDriver,
+        PrimitiveModuleError, ResolvedPortType, SelectionArgumentError, StructureLayoutError,
+        StructureNumber, StructureNumberErrorKind, StructurePlacementError,
+        StructureResolutionError, StructureTypeError,
     },
 };
 
-use super::{located, position};
+use super::{expansion_error, located, position, reference_reason};
 
 /// 変換段階と違反のある位置を表示する。Core が返す関連範囲も添える。
 pub(crate) fn error(
@@ -23,24 +28,31 @@ pub(crate) fn error(
     name: &str,
     diagnostic: ClockedModuleVmError<'_, '_>,
 ) -> String {
-    let site = project
-        .circuits()
-        .get(owner.file)
-        .and_then(|circuit| {
-            let entry = circuit.syntax.entries.get(owner.entry)?;
-            let named = circuit
-                .names
-                .iter()
-                .find(|named| named.form == entry.form)?;
-            let source = project.sources().get(owner.file)?;
-            Some(position(
-                &source.id.components().join("/"),
-                &named.name.span,
-            ))
-        })
-        .unwrap_or_else(|| name.to_owned());
+    let site = module_site(project, owner).unwrap_or_else(|| name.to_owned());
 
     match diagnostic {
+        ClockedModuleVmError::Hierarchy(error) => hierarchy_error(project, &site, error),
+        ClockedModuleVmError::InModule {
+            owner: module,
+            reason,
+        } => {
+            let mut message = error(project, module, name, *reason);
+            if module != owner
+                && let Some(module_site) = module_site(project, module)
+            {
+                message.push_str(&format!("\n  展開中のモジュール {module_site}"));
+            }
+            message
+        }
+        ClockedModuleVmError::ChildStateCapacity {
+            call,
+            used,
+            width,
+            capacity,
+        } => format!(
+            "{} 子モジュールの状態出力を加えると、親の入力配線の容量を超える。使用済み {used} ビット、追加 {width} ビット、上限 {capacity} ビット。",
+            located(&call),
+        ),
         ClockedModuleVmError::Endpoints(error) => match error {
             ClockedEndpointError::Calls(error) => calls(&site, error),
             ClockedEndpointError::Ports(error) => ports(&site, error),
@@ -66,7 +78,7 @@ pub(crate) fn error(
             ClockedEndpointError::Allocation => format!("{site} 配線の配置表を確保できない。"),
             ClockedEndpointError::Layout => format!("{site} 定義のビット配置が一致しない。"),
             ClockedEndpointError::Unsupported(at) => format!(
-                "{} 定義の右辺には信号名、ビット選択、信号名やビットリテラルの連接、または基底 NOR・ラッチ・RAM の直接呼び出しを指定する。",
+                "{} 定義の右辺には信号名、ビット選択、信号名やビットリテラルの連接、または基底 NOR・ラッチ・RAM・func・子 module の直接呼び出しを指定する。",
                 located(&at),
             ),
             ClockedEndpointError::AliasBits { reference, reason } => {
@@ -168,6 +180,185 @@ pub(crate) fn error(
                 }
             }
         }
+    }
+}
+
+fn module_site(project: &CircuitProject<'_>, owner: ModuleBodyPosition) -> Option<String> {
+    let circuit = project.circuits().get(owner.file)?;
+    let entry = circuit.syntax.entries.get(owner.entry)?;
+    let named = circuit
+        .names
+        .iter()
+        .find(|named| named.form == entry.form)?;
+    let source = project.sources().get(owner.file)?;
+    Some(position(
+        &source.id.components().join("/"),
+        &named.name.span,
+    ))
+}
+
+fn hierarchy_error(
+    project: &CircuitProject<'_>,
+    site: &str,
+    error: ClockedModuleError<'_, '_>,
+) -> String {
+    match error {
+        ClockedModuleError::Parent(error) => calls(site, error),
+        ClockedModuleError::Child { call, reason } => child_error(site, &call, reason),
+        ClockedModuleError::Function { call, expansion } => format!(
+            "{}\n  関数の呼び出し元 {}",
+            expansion_error(project, expansion),
+            located(&call),
+        ),
+        ClockedModuleError::StructureLayout(error) => structure_layout_error(site, error),
+        ClockedModuleError::PortLayout {
+            direction,
+            site: port,
+            layout,
+        } => ports(
+            site,
+            ClockedModuleOutputsError::Port {
+                direction,
+                site: port,
+                layout,
+            },
+        ),
+        ClockedModuleError::Unsupported(at) => {
+            format!("{} この式や型は現在の階層変換で扱えない。", located(&at))
+        }
+        ClockedModuleError::Capacity(at) => {
+            format!("{} NOR ゲート数が上限を超える。", located(&at))
+        }
+        ClockedModuleError::AliasCycle(references) => {
+            alias_cycle(site, references.iter().map(located))
+        }
+        ClockedModuleError::Recursion(references) => diagnostic_path(
+            site,
+            "モジュールの呼び出しが循環している。",
+            "循環内の呼び出し",
+            references.iter().map(located),
+        ),
+        ClockedModuleError::Instance(at, error) => {
+            let detail = match error {
+                ClockedInstanceError::InputCount => {
+                    "実引数のビット数が子モジュールの入力幅と一致しない。".to_owned()
+                }
+                ClockedInstanceError::GateCapacity => "NOR ゲート数が上限を超える。".to_owned(),
+                ClockedInstanceError::Argument(index) => {
+                    format!("実引数のビット添字 {index} が親の配線範囲外を指している。")
+                }
+            };
+            format!("{} {detail}", located(&at))
+        }
+        ClockedModuleError::Netlist(error) => match error {
+            ClockedNorError::GateInput { gate, side } => {
+                let side = match side {
+                    GateInput::Left => "左",
+                    GateInput::Right => "右",
+                };
+                format!("{site} ゲート {gate} の{side}入力が配線の範囲外を指している。")
+            }
+            ClockedNorError::Output { output } => {
+                format!("{site} 出力のビット添字 {output} が配線の範囲外を指している。")
+            }
+        },
+    }
+}
+
+fn child_error(
+    site: &str,
+    call: &LocatedName<'_, '_>,
+    error: PrimitiveModuleError<'_, '_>,
+) -> String {
+    let call = located(call);
+    let message = match error {
+        PrimitiveModuleError::Module(error) => calls(site, error),
+        PrimitiveModuleError::Port(at) => {
+            format!(
+                "{} このポートの型は子モジュールの変換で扱えない。",
+                located(&at)
+            )
+        }
+        PrimitiveModuleError::Definition(at) => {
+            format!("{} この右辺は子モジュールの変換で扱えない。", located(&at))
+        }
+        PrimitiveModuleError::Argument(at) => {
+            format!("{} この引数は子モジュールの変換で扱えない。", located(&at))
+        }
+    };
+    format!("{message}\n  子モジュールの呼び出し元 {call}")
+}
+
+fn structure_layout_error(site: &str, error: StructureTypeError<'_, '_>) -> String {
+    match error {
+        StructureTypeError::Layout(StructureLayoutError::Resolution(error)) => match error.error {
+            StructureResolutionError::Number(error) => {
+                let number = match error.number {
+                    StructureNumber::TotalWidth => "構造体の幅",
+                    StructureNumber::FieldWidth => "フィールドの幅",
+                    StructureNumber::FieldOffset => "フィールドのオフセット",
+                };
+                let detail = match error.kind {
+                    StructureNumberErrorKind::NumericRange => {
+                        format!("{number}が 64 ビット自然数の範囲を超える。")
+                    }
+                    StructureNumberErrorKind::ZeroWidth => {
+                        format!("{number}には 1 ビット以上を指定する。")
+                    }
+                    StructureNumberErrorKind::WidthLimit { width, limit } => {
+                        format!("{number} {width} ビットが上限 {limit} ビットを超える。")
+                    }
+                };
+                let site = position(&error.source.id.components().join("/"), &error.span);
+                format!("{site} {detail}")
+            }
+            StructureResolutionError::TypeReference { reference, reason } => {
+                let name = reference
+                    .source
+                    .text
+                    .get(reference.span.clone())
+                    .unwrap_or("型名");
+                reference_reason(&located(&reference), name, reason)
+            }
+        },
+        StructureTypeError::Layout(StructureLayoutError::Placement { error, .. }) => match error {
+            StructurePlacementError::DuplicateName { later, prior } => format!(
+                "{} フィールド名が重複している。\n  先の宣言 {}",
+                located(&later),
+                located(&prior),
+            ),
+            StructurePlacementError::Outside {
+                offset,
+                start,
+                field_width,
+                structure_width,
+            } => format!(
+                "{} 開始ビット {start}、幅 {field_width} ビットのフィールドが構造体の幅 {structure_width} ビットに収まらない。",
+                located(&offset),
+            ),
+            StructurePlacementError::Overlap {
+                later,
+                prior,
+                later_range,
+                prior_range,
+            } => format!(
+                "{} フィールドのビット範囲 [{}..{}] が先のフィールド [{}..{}] と重なる。\n  先の宣言 {}",
+                located(&later),
+                later_range.start,
+                later_range.end,
+                prior_range.start,
+                prior_range.end,
+                located(&prior),
+            ),
+        },
+        StructureTypeError::Cycle { references } => diagnostic_path(
+            site,
+            "構造体のフィールド型が循環している。",
+            "循環内の型参照",
+            references
+                .iter()
+                .map(|reference| located(&reference.location)),
+        ),
     }
 }
 
@@ -355,11 +546,25 @@ fn literal_width_error(error: CircuitLiteralWidthError) -> String {
 }
 
 /// Core が返した閉路順に、最初の参照位置と残りの関連位置を表示する。
-fn alias_cycle(fallback: &str, mut locations: impl Iterator<Item = String>) -> String {
+fn alias_cycle(fallback: &str, locations: impl Iterator<Item = String>) -> String {
+    diagnostic_path(
+        fallback,
+        "配線参照だけで循環している。",
+        "循環内の参照",
+        locations,
+    )
+}
+
+fn diagnostic_path(
+    fallback: &str,
+    heading: &str,
+    label: &str,
+    mut locations: impl Iterator<Item = String>,
+) -> String {
     let first = locations.next().unwrap_or_else(|| fallback.to_owned());
-    let mut message = format!("{first} 配線参照だけで循環している。");
+    let mut message = format!("{first} {heading}");
     for location in locations {
-        message.push_str(&format!("\n  循環内の参照 {location}"));
+        message.push_str(&format!("\n  {label} {location}"));
     }
     message
 }
