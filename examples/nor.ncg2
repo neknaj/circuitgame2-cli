@@ -1,0 +1,4 @@
+(using nor)
+
+(func gate (in x y) (out z)
+  (def z (nor x y)))
