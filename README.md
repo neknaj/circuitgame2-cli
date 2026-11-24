@@ -1,6 +1,6 @@
 # circuitgame2-cli
 
-NCG2 の回路ソースをコマンドラインで検査する。組み合わせ関数を評価し、順序回路を tick ごとに実行する。
+`ncg2` は neknaj circuit game 2 の回路ソースを扱う CLI。ソースの検査、組み合わせ関数の評価、順序回路の実行ができる。
 
 ## インストールする
 
@@ -10,19 +10,19 @@ Rustup と Git を用意し、順序回路の実行に対応したブランチ�
 git clone --branch stage3/project-config https://github.com/neknaj/circuitgame2-cli.git
 cd circuitgame2-cli
 cargo install --path . --locked
-circuitgame2 --version
-circuitgame2 --help
+ncg2 --version
+ncg2 --help
 ```
 
-`circuitgame2` が見つからない場合は、Cargo が表示した実行ファイルの保存先ディレクトリを `PATH` に加える。
+`ncg2` が見つからない場合は、Cargo が表示した実行ファイルの保存先ディレクトリを `PATH` に加える。
 
 ## 付属の NOR を試す
 
 CLI リポジトリのルートで [NOR の例題](examples/nor.ncg2)を検査し、組み合わせ関数 `::gate` を評価する。
 
 ```sh
-circuitgame2 check examples/nor.ncg2
-circuitgame2 eval --func ::gate --input 00 examples/nor.ncg2
+ncg2 check examples/nor.ncg2
+ncg2 eval --func ::gate --input 00 examples/nor.ncg2
 ```
 
 検査に成功すると `検査成功（1 ファイル）` と表示される。`eval` は 0 と 0 を入力し、NOR の出力 `1` を表示する。`--input 01` では `0` が返る。
@@ -30,7 +30,7 @@ circuitgame2 eval --func ::gate --input 00 examples/nor.ncg2
 ## 順序回路を動かす
 
 ```sh
-circuitgame2 run --input 11 --input 00 examples/latch.ncg2
+ncg2 run --input 11 --input 00 examples/latch.ncg2
 ```
 
 [ラッチの例題](examples/latch.ncg2)ではラッチの出力 `q` と NOR の出力を観測する。各行は tick 番号と出力ビット列を空白で区切る。
@@ -56,7 +56,7 @@ circuitgame2 run --input 11 --input 00 examples/latch.ncg2
 [ビット選択の例題](examples/selected-latch.ncg2)では、`(def sampled (slice data 0 2 2))` が `data` のビット 0 と 2 を選んで `sampled` を定義する。ラッチには `sampled` を渡し、`(bit data 1)` で書き込み許可ビットを選ぶ。ビット 0 は最下位ビット。
 
 ```sh
-circuitgame2 run --input 0110 --input 1000 examples/selected-latch.ncg2
+ncg2 run --input 0110 --input 1000 examples/selected-latch.ncg2
 ```
 
 1 tick 目でラッチに `01` を書き込む。2 tick 目は許可ビットが 0 なので `01` を保持する。
@@ -72,7 +72,7 @@ circuitgame2 run --input 0110 --input 1000 examples/selected-latch.ncg2
 [連接の例題](examples/concat.ncg2)の `(concat low word 1)` は 1 ビットの入力 `low`、2 ビットの入力 `word`、定数 `1` を下位から順に並べる。
 
 ```sh
-circuitgame2 run --input 010 examples/concat.ncg2
+ncg2 run --input 010 examples/concat.ncg2
 ```
 
 ```text
@@ -87,7 +87,7 @@ reset 直後は入力がすべて 0 で、定数 1 は出力の最後に現れ�
 [RAM の例題](examples/ram.ncg2)はアドレス、2 ビットの書き込み値、書き込み許可をこの順に受け取る。
 
 ```sh
-circuitgame2 run --input 1101 --input 1011 --input 1000 --input 0000 examples/ram.ncg2
+ncg2 run --input 1101 --input 1011 --input 1000 --input 0000 examples/ram.ncg2
 ```
 
 ```text
@@ -105,7 +105,7 @@ circuitgame2 run --input 1101 --input 1011 --input 1000 --input 0000 examples/ra
 [階層 RAM の例題](examples/hierarchy-ram.ncg2)では、`::main` が子モジュール `memory-port` を二度呼び、読み出し結果を `left` と `right` に接続する。入力はアドレス、左のデータと書き込み許可、右のデータと書き込み許可の順に並べる。
 
 ```sh
-circuitgame2 run --input 11100 --input 10111 --input 10000 examples/hierarchy-ram.ncg2
+ncg2 run --input 11100 --input 10111 --input 10000 examples/hierarchy-ram.ncg2
 ```
 
 ```text
@@ -122,7 +122,7 @@ circuitgame2 run --input 11100 --input 10111 --input 10000 examples/hierarchy-ra
 ソースが複数ある回路では、UTF-8 の `circuitgame2.toml` にソース一覧と開始点を書く。[プロジェクトの例題](examples/project/circuitgame2.toml)は、CLI リポジトリのルートで実行できる。
 
 ```sh
-circuitgame2 run --project examples/project/circuitgame2.toml --input 0 --input 1
+ncg2 run --project examples/project/circuitgame2.toml --input 0 --input 1
 ```
 
 ```text
@@ -140,7 +140,7 @@ circuitgame2 run --project examples/project/circuitgame2.toml --input 0 --input 
 [VRAM の例題](examples/vram/circuitgame2.toml)は、読み出し信号 `read-data` を公開名 `screen` に対応付ける。`--vram` を指定すると、回路の出力の後ろに RAM の全記憶を表示する。
 
 ```sh
-circuitgame2 run --project examples/vram/circuitgame2.toml --vram screen --input 1101 --input 1000
+ncg2 run --project examples/vram/circuitgame2.toml --vram screen --input 1101 --input 1000
 ```
 
 ```text
@@ -158,8 +158,8 @@ circuitgame2 run --project examples/vram/circuitgame2.toml --vram screen --input
 入力を固定したときの定常化までの上界を `settle` で求める。同じ回路を CI で確認するときは、上限の tick 数を `--within` で指定する。
 
 ```sh
-circuitgame2 settle --project examples/project/circuitgame2.toml
-circuitgame2 settle --project examples/project/circuitgame2.toml --within 1 --period 2
+ncg2 settle --project examples/project/circuitgame2.toml
+ncg2 settle --project examples/project/circuitgame2.toml --within 1 --period 2
 ```
 
 例題の上界は 1 tick。条件を指定した実行では、1 tick 後から 2 tick 間隔で同じ内部状態になることを確認する。`--period` を省略すると間隔は 1 になる。
@@ -179,8 +179,8 @@ circuitgame2 settle --project examples/project/circuitgame2.toml --within 1 --pe
 [ラッチの例題](examples/latch.ncg2)を自分の回路用ディレクトリに `main.ncg2` として保存する。そのディレクトリへ移動して、インストールした CLI を実行する。
 
 ```sh
-circuitgame2 check main.ncg2
-circuitgame2 run --input 11 --input 00 main.ncg2
+ncg2 check main.ncg2
+ncg2 run --input 11 --input 00 main.ncg2
 ```
 
 付属の例題と同じ出力が得られる。自分で書いた回路も同じ手順で実行する。UTF-8 で保存し、ソースを実行場所からの相対パスで並べる。プロジェクト全体で `(using nor)` を一つ指定する。
@@ -194,7 +194,7 @@ circuitgame2 run --input 11 --input 00 main.ncg2
 
 ## Cargo から直接実行する
 
-付属例は Cargo からも実行できる。CLI リポジトリのルートで、コマンドの先頭の `circuitgame2` を `cargo run --quiet --locked --` に置き換える。
+付属例は Cargo からも実行できる。CLI リポジトリのルートで、コマンドの先頭の `ncg2` を `cargo run --quiet --locked --` に置き換える。
 
 ```sh
 cargo run --quiet --locked -- check examples/nor.ncg2
@@ -207,9 +207,9 @@ CLI リポジトリのルートで WASI 向けにビルドし、Wasmtime で実�
 ```sh
 rustup target add wasm32-wasip2
 cargo build --locked --target wasm32-wasip2
-wasmtime run --dir=. target/wasm32-wasip2/debug/circuitgame2.wasm check examples/nor.ncg2
-wasmtime run --dir=. target/wasm32-wasip2/debug/circuitgame2.wasm eval --func ::gate --input 00 examples/nor.ncg2
-wasmtime run --dir=. target/wasm32-wasip2/debug/circuitgame2.wasm run --input 11 --input 00 examples/latch.ncg2
+wasmtime run --dir=. target/wasm32-wasip2/debug/ncg2.wasm check examples/nor.ncg2
+wasmtime run --dir=. target/wasm32-wasip2/debug/ncg2.wasm eval --func ::gate --input 00 examples/nor.ncg2
+wasmtime run --dir=. target/wasm32-wasip2/debug/ncg2.wasm run --input 11 --input 00 examples/latch.ncg2
 ```
 
 ## 開発

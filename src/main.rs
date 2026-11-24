@@ -24,16 +24,16 @@ use circuitgame2_core::{
 
 const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価してモジュールを実行する。\n\
 \n\
-  circuitgame2 check <ファイル>...\n\
-  circuitgame2 check --project <設定ファイル>\n\
-  circuitgame2 eval --func <関数名> --input <ビット列> <ファイル>...\n\
-  circuitgame2 eval --func <関数名> --input <ビット列> --project <設定ファイル>\n\
-  circuitgame2 run [--entry <モジュール名>] [--input <ビット列>]... <ファイル>...\n\
-  circuitgame2 run --project <設定ファイル> [--input <ビット列>]... [--vram <公開名>]...\n\
-  circuitgame2 settle [--within <tick 数> [--period <間隔>]] [--entry <モジュール名>] <ファイル>...\n\
-  circuitgame2 settle [--within <tick 数> [--period <間隔>]] --project <設定ファイル>\n\
-  circuitgame2 --help\n\
-  circuitgame2 --version\n\
+  ncg2 check <ファイル>...\n\
+  ncg2 check --project <設定ファイル>\n\
+  ncg2 eval --func <関数名> --input <ビット列> <ファイル>...\n\
+  ncg2 eval --func <関数名> --input <ビット列> --project <設定ファイル>\n\
+  ncg2 run [--entry <モジュール名>] [--input <ビット列>]... <ファイル>...\n\
+  ncg2 run --project <設定ファイル> [--input <ビット列>]... [--vram <公開名>]...\n\
+  ncg2 settle [--within <tick 数> [--period <間隔>]] [--entry <モジュール名>] <ファイル>...\n\
+  ncg2 settle [--within <tick 数> [--period <間隔>]] --project <設定ファイル>\n\
+  ncg2 --help\n\
+  ncg2 --version\n\
 \n\
 ファイルはコマンドを実行するディレクトリからの相対パスで指定する。\n\
 --project を使う場合、ソースは設定ファイルのディレクトリを基準に読む。\n\
@@ -276,7 +276,7 @@ fn command(args: &[String]) -> Result<Command<'_>, String> {
         }
         [run, args @ ..] if run == "run" => run_command(args),
         [settle, args @ ..] if settle == "settle" => settle_command(args),
-        _ => Err("使い方は circuitgame2 --help で確認できる。".into()),
+        _ => Err("使い方は ncg2 --help で確認できる。".into()),
     }
 }
 
@@ -409,7 +409,7 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<ExitCode, String> {
                 .map(|()| ExitCode::SUCCESS);
         }
         Command::Version => {
-            return writeln!(stdout, "circuitgame2 {}", env!("CARGO_PKG_VERSION"))
+            return writeln!(stdout, "ncg2 {}", env!("CARGO_PKG_VERSION"))
                 .map_err(output_error)
                 .map(|()| ExitCode::SUCCESS);
         }
