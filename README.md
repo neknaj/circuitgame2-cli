@@ -7,7 +7,7 @@
 Rustup と Git を用意し、順序回路の実行に対応したブランチを取得する。[ツールチェーン](rust-toolchain.toml)は Rust 1.99.1 を指定する。
 
 ```sh
-git clone --branch stage3/project-config https://github.com/neknaj/circuitgame2-cli.git
+git clone --branch stage3/lsp https://github.com/neknaj/circuitgame2-cli.git
 cd circuitgame2-cli
 cargo install --path . --locked
 ncg2 --version
@@ -211,6 +211,12 @@ wasmtime run --dir=. target/wasm32-wasip2/debug/ncg2.wasm check examples/nor.ncg
 wasmtime run --dir=. target/wasm32-wasip2/debug/ncg2.wasm eval --func ::gate --input 00 examples/nor.ncg2
 wasmtime run --dir=. target/wasm32-wasip2/debug/ncg2.wasm run --input 11 --input 00 examples/latch.ncg2
 ```
+
+## エディタで構文診断を使う
+
+ネイティブ環境でインストールすると、`ncg2` と `circuitgame2-lsp` が使える。エディタの LSP 設定で `circuitgame2-lsp` を標準入出力のサーバーとして起動し、`.ncg2` の言語 ID を `ncg2` に設定する。
+
+開いた文書の字句、S 式、回路フォームを検査する。構文を回復できた場合は、後続のフォームの診断も表示する。プロジェクト設定を使った名前解決、型検査、補完は今後の実装で対応する。
 
 ## 開発
 
