@@ -11,8 +11,9 @@ use circuitgame2_cli::config;
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding, TextPosition},
     project::{
-        DefinitionAnalysisError, ProjectSource, SourceSnapshot, analyze_definitions,
-        normalize_path, parse_circuit_project,
+        CircuitProject, DefinitionBinding, LocatedName, ProjectSource, SourceSnapshot, VirtualPath,
+        check_use_aliases, index_use_targets, normalize_path, parse_circuit_project,
+        validate_circuit_basis,
     },
 };
 use lsp_types::{Location, Uri};
@@ -77,13 +78,7 @@ pub(super) fn locate<'a>(
     };
     let current = normalize_path(&current_id)
         .map_err(|_| format!("{current_id} の仮想パスを解釈できない。"))?;
-    let target = match analyze_definitions(&project) {
-        Ok(analysis) => analysis.definition_location(&current, offset),
-        Err(DefinitionAnalysisError::Definition { aliases, .. }) => {
-            aliases.alias_location(&current, offset)
-        }
-        Err(_) => None,
-    };
+    let target = resolved_location(&project, &current, offset);
     Ok(target.and_then(|location| {
         let source = location.source;
         let target = sources
@@ -95,7 +90,73 @@ pub(super) fn locate<'a>(
     }))
 }
 
+fn resolved_location<'p, 'a>(
+    project: &'p CircuitProject<'a>,
+    current: &VirtualPath<'_>,
+    offset: usize,
+) -> Option<LocatedName<'p, 'a>> {
+    validate_circuit_basis(project).ok()?;
+    let targets = index_use_targets(project).ok()?;
+    let scope = check_use_aliases(&targets).ok()?;
+    let file = project
+        .sources()
+        .iter()
+        .position(|source| source.id.same_file(current))?;
+    if let Some(target) = scope.resolve_reference_at_offset(file, offset) {
+        let target = target.ok()?;
+        return match target.binding {
+            DefinitionBinding::Declaration { source, form } => Some(LocatedName {
+                source,
+                span: form.name.span.clone(),
+            }),
+            DefinitionBinding::Nor => None,
+        };
+    }
+    targets.alias_location(current, offset)
+}
+
 type OpenSources<'a> = BTreeMap<PathBuf, Option<OpenDocument<'a>>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lsp_types::{Position, Range};
+
+    #[test]
+    fn finds_definition_with_an_unresolved_call_elsewhere() {
+        let uri = "untitled:local.ncg2".parse().unwrap();
+        let bad = "(func bad (in x) (out y) (def y (missing x)))";
+        let caller = "(func caller (in x) (out y) (def y (invert x)))";
+        let text = format!(
+            "(using nor)\n(func invert (in x) (out y) (def y (nor x x)))\n{bad}\n{caller}\n"
+        );
+        let current = OpenDocument {
+            uri: &uri,
+            text: Some(&text),
+            version: 1,
+        };
+        let query = |line, column| {
+            locate(
+                current,
+                TextPosition { line, column },
+                PositionEncoding::Utf16,
+                std::iter::once(current),
+            )
+            .unwrap()
+        };
+
+        let call = caller.find("invert").unwrap();
+        assert_eq!(
+            query(3, call),
+            Some(Location::new(
+                uri.clone(),
+                Range::new(Position::new(1, 6), Position::new(1, 12)),
+            )),
+        );
+        assert_eq!(query(3, call + "invert".len()), None);
+        assert_eq!(query(2, bad.find("missing").unwrap()), None);
+    }
+}
 
 fn load_sources<'a>(
     paths: Vec<(String, PathBuf)>,
