@@ -27,9 +27,11 @@ const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価して�
   circuitgame2 --help\n\
   circuitgame2 --version\n\
 \n\
-ファイルはプロジェクトルートからの相対パスで指定する。\n\
+ファイルはコマンドを実行するディレクトリからの相対パスで指定する。\n\
 宣言名には ::gate や ::lib::gate のような完全修飾名を使う。\n\
-run の既定の開始点は ::main。入力ごとに 1 tick 進め、reset 直後から観測値を出力する。\n\
+run の既定の開始点は ::main。--input 一つにつき 1 tick 進める。\n\
+入力ポートがない回路は --input= で 1 tick 進める。\n\
+run は reset 直後を tick 0 とし、各行に tick 番号と出力ビット列を表示する。\n\
 入出力はポートの宣言順に並べ、各ポート内は最下位ビットから記す。";
 
 const WIDTH_LIMIT: u64 = 65_536;
