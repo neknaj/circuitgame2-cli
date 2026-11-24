@@ -1,7 +1,6 @@
 //! UTF-8 の NCG2 ファイルを読み込み、回路を検査・評価・実行する。
 
 mod clocked;
-mod config;
 mod diagnostic;
 mod settling;
 
@@ -14,6 +13,7 @@ use std::{
     process::ExitCode,
 };
 
+use circuitgame2_cli::config;
 use circuitgame2_core::{
     project::{
         CircuitProject, ModuleBodyPosition, NameKey, SourceKind, SourceSnapshot, UseTargets,

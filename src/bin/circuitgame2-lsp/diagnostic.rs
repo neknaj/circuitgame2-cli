@@ -86,7 +86,7 @@ pub(super) fn collect(uri: &Uri, source: &str, encoding: PositionEncoding) -> Ve
         .collect()
 }
 
-fn wire_range(
+pub(super) fn wire_range(
     lines: &LineIndex<'_>,
     bytes: &[u8],
     span: &Range<usize>,

@@ -10,13 +10,13 @@ use std::{
 use circuitgame2_core::editor::{LineIndex, PositionEncoding, TextPosition, apply_source_edit};
 use lsp_server::{ErrorCode, Message, Notification, Request, Response};
 use lsp_types::{
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, InitializeParams, InitializeResult,
-    PositionEncodingKind, PublishDiagnosticsParams, ServerCapabilities, ServerInfo,
-    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams, InitializeParams,
+    InitializeResult, OneOf, PositionEncodingKind, PublishDiagnosticsParams, ServerCapabilities,
+    ServerInfo, TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
     TextDocumentSyncOptions, Uri, VersionedTextDocumentIdentifier,
 };
 
-use super::diagnostic;
+use super::{definition, diagnostic};
 
 #[derive(Clone, Copy, Default)]
 enum State {
@@ -76,6 +76,7 @@ impl Server {
                 self.state = State::Shutdown;
                 Response::new_ok(request.id, ())
             }
+            (State::Ready, "textDocument/definition") => self.definition(request),
             (State::Ready, method) if method != "initialize" => Response::new_err(
                 request.id,
                 ErrorCode::MethodNotFound as i32,
@@ -121,6 +122,7 @@ impl Server {
             InitializeResult {
                 capabilities: ServerCapabilities {
                     position_encoding: Some(wire_encoding),
+                    definition_provider: Some(OneOf::Left(true)),
                     text_document_sync: Some(TextDocumentSyncCapability::Options(
                         TextDocumentSyncOptions {
                             open_close: Some(true),
@@ -136,6 +138,43 @@ impl Server {
                 }),
             },
         )
+    }
+
+    fn definition(&self, request: Request) -> Response {
+        let params: GotoDefinitionParams = match serde_json::from_value(request.params) {
+            Ok(params) => params,
+            Err(error) => {
+                return Response::new_err(
+                    request.id,
+                    ErrorCode::InvalidParams as i32,
+                    error.to_string(),
+                );
+            }
+        };
+        let parameters = params.text_document_position_params;
+        let uri = &parameters.text_document.uri;
+        let position = match text_position(parameters.position) {
+            Ok(position) => position,
+            Err(error) => {
+                return Response::new_err(
+                    request.id,
+                    ErrorCode::InvalidParams as i32,
+                    error.into(),
+                );
+            }
+        };
+        let (Some(document), Some(encoding)) = (self.documents.get(uri), self.encoding) else {
+            return Response::new_ok(request.id, ());
+        };
+        let current = document.open_snapshot(uri);
+        let open = self
+            .documents
+            .iter()
+            .map(|(uri, document)| document.open_snapshot(uri));
+        match definition::locate(current, position, encoding, open) {
+            Ok(location) => Response::new_ok(request.id, location),
+            Err(error) => Response::new_err(request.id, ErrorCode::RequestFailed as i32, error),
+        }
     }
 
     fn notification(&mut self, notification: Notification) -> Option<Message> {
@@ -185,6 +224,14 @@ impl Server {
 }
 
 impl Document {
+    fn open_snapshot<'a>(&'a self, uri: &'a Uri) -> definition::OpenDocument<'a> {
+        definition::OpenDocument {
+            uri,
+            text: self.text.as_deref(),
+            version: self.version,
+        }
+    }
+
     /// 同じ通知の変更を前から適用し、最終結果だけを保持する。
     /// 範囲を適用できなかった本文は、次の全文置換で再取得する。
     fn change(

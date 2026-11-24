@@ -3,6 +3,8 @@
 use std::process::ExitCode;
 
 #[cfg(not(target_os = "wasi"))]
+mod definition;
+#[cfg(not(target_os = "wasi"))]
 mod diagnostic;
 #[cfg(not(target_os = "wasi"))]
 mod server;
