@@ -5,4 +5,5 @@
   (memory bank (address 64) (data (bits 1)))
   (module capacity (in (a (bits 64)) d we) (out q)
     (def q (bank a d we)))
-  (module bad-slice (in x) (out y)))
+  (module bad-slice (in x) (out y))
+  (module cycle (in) (out x) (def x y)))

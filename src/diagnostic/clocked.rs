@@ -3,12 +3,13 @@
 use circuitgame2_core::{
     netlist::{ClockedStorageError, ClockedVmError, StateAllocationError},
     project::{
-        CallInputReason, CircuitProject, ClockedArgumentWiringError, ClockedDefinitionLayoutError,
-        ClockedEndpointError, ClockedModuleOutputsError, ClockedModuleVmError,
-        ClockedStorageLayoutError, ModuleAliasTypesError, ModuleBodyPosition,
-        ModuleCallInputsError, ModuleCallPortsError, ModuleCallsError, ModuleDriverError,
-        ModuleOutputTypesError, ModuleRootTypesError, ModuleSelectionsError, ModuleWiringError,
-        ResolvedPortType, SelectionArgumentError,
+        BitSelectionError, CallInputReason, CircuitProject, ClockedArgumentWiringError,
+        ClockedDefinitionLayoutError, ClockedDriverBitsError, ClockedEndpointError,
+        ClockedModuleOutputsError, ClockedModuleVmError, ClockedStorageLayoutError,
+        ModuleAliasTypesError, ModuleBodyPosition, ModuleCallInputsError, ModuleCallPortsError,
+        ModuleCallsError, ModuleDriverError, ModuleOutputTypesError, ModuleRootTypesError,
+        ModuleSelectionsError, ModuleWiringError, OutputDriver, ResolvedPortType,
+        SelectionArgumentError,
     },
 };
 
@@ -64,9 +65,22 @@ pub(crate) fn error(
             ClockedEndpointError::Allocation => format!("{site} 配線の配置表を確保できない。"),
             ClockedEndpointError::Layout => format!("{site} 定義のビット配置が一致しない。"),
             ClockedEndpointError::Unsupported(at) => format!(
-                "{} 直接の NOR、ラッチ、RAM の呼び出しを定義の右辺に指定する。",
+                "{} 定義の右辺には信号名か、基底 NOR、ラッチ、RAM の直接呼び出しを指定する。",
                 located(&at),
             ),
+            ClockedEndpointError::AliasBits { reference, reason } => {
+                format!(
+                    "{} 参照した信号を配線できない。{}",
+                    located(&reference),
+                    driver_bits_error(reason)
+                )
+            }
+            ClockedEndpointError::Driver(at) => {
+                format!("{} 定義の駆動元が配線の範囲外にある。", located(&at))
+            }
+            ClockedEndpointError::AliasCycle(references) => {
+                alias_cycle(&site, references.iter().map(located))
+            }
             ClockedEndpointError::GateCapacity(at) => {
                 format!("{} NOR ゲート数が上限を超える。", located(&at))
             }
@@ -75,7 +89,7 @@ pub(crate) fn error(
                 produced,
                 allocated,
             } => format!(
-                "{} 定義に必要な幅は {allocated} ビットだが、呼び出しは {produced} ビットを出力する。",
+                "{} 定義に必要な幅は {allocated} ビットだが、右辺の幅は {produced} ビットである。",
                 located(&definition),
             ),
         },
@@ -221,6 +235,9 @@ fn calls(site: &str, error: ModuleCallsError<'_, '_>) -> String {
 
 fn module_expression(site: &str, error: ModuleSelectionsError<'_, '_>) -> String {
     match error {
+        ModuleSelectionsError::Types(ModuleAliasTypesError::Cycle(steps)) => {
+            alias_cycle(site, steps.iter().map(|step| located(&step.reference)))
+        }
         ModuleSelectionsError::Argument(error)
         | ModuleSelectionsError::Types(ModuleAliasTypesError::Sources(
             ModuleRootTypesError::SelectionArgument(error),
@@ -255,6 +272,49 @@ fn module_expression(site: &str, error: ModuleSelectionsError<'_, '_>) -> String
             ModuleRootTypesError::Call(error),
         )) => call_ports(site, error),
         _ => format!("{site} モジュールの型または結線に違反がある。"),
+    }
+}
+
+/// Core が返した閉路順に、最初の参照位置と残りの関連位置を表示する。
+fn alias_cycle(fallback: &str, mut locations: impl Iterator<Item = String>) -> String {
+    let first = locations.next().unwrap_or_else(|| fallback.to_owned());
+    let mut message = format!("{first} 信号の直結だけで循環している。");
+    for location in locations {
+        message.push_str(&format!("\n  循環内の参照 {location}"));
+    }
+    message
+}
+
+fn driver_bits_error(error: ClockedDriverBitsError) -> String {
+    match error {
+        ClockedDriverBitsError::Driver(OutputDriver::Input(index)) => {
+            format!("入力ポート {index} の配線が見つからない。")
+        }
+        ClockedDriverBitsError::Driver(OutputDriver::Definition(index)) => {
+            format!("定義 {index} の配線が見つからない。")
+        }
+        ClockedDriverBitsError::Selection(BitSelectionError::ZeroCount) => {
+            "選択するビット数は 1 以上を指定する。".into()
+        }
+        ClockedDriverBitsError::Selection(BitSelectionError::ZeroStride) => {
+            "選択の刻みは 1 以上を指定する。".into()
+        }
+        ClockedDriverBitsError::Selection(BitSelectionError::Outside {
+            start,
+            last,
+            input_width,
+        }) => {
+            format!(
+                "末尾添字 {last} が入力幅 {input_width} ビットの範囲を外れる。開始添字は {start}。"
+            )
+        }
+        ClockedDriverBitsError::Last { expected, actual } => {
+            format!("末尾添字の計算結果は {expected} だが、保持された値は {actual} である。")
+        }
+        ClockedDriverBitsError::Capacity { count, limit } => {
+            format!("必要な配線数 {count} が上限 {limit} を超える。")
+        }
+        ClockedDriverBitsError::Allocation => "配線に必要なメモリを確保できない。".into(),
     }
 }
 
