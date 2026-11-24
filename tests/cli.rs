@@ -248,9 +248,77 @@ fn reports_the_slice_range_in_the_source_fragment() {
         stderr.contains("tests/fixtures/slice-part.ncg2 ["),
         "{stderr}"
     );
-    assert!(stderr.contains("添字 5..5 が入力幅 1 ビット"), "{stderr}");
+    assert!(stderr.contains("末尾添字 5 が入力幅 1 ビット"), "{stderr}");
     assert!(
         stderr.contains("入力の幅 tests/fixtures/clocked.ncg2 ["),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn readme_selection_example_routes_bit_and_slice_to_a_latch() {
+    let trace = cli(&[
+        "run",
+        "--input",
+        "0110",
+        "--input",
+        "1000",
+        "examples/selected-latch.ncg2",
+    ]);
+    assert!(
+        trace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trace.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(trace.stdout).unwrap(),
+        "0 00\n1 01\n2 01\n"
+    );
+    assert!(trace.stderr.is_empty());
+}
+
+#[test]
+fn run_describes_selection_range_and_port_width_in_call_arguments() {
+    const PATH: &str = "tests/fixtures/selected-arguments.ncg2";
+    let text = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(PATH)).unwrap();
+    let location = |word: &str| {
+        let start = text.find(word).unwrap();
+        format!("{PATH} [{start}..{}]", start + word.len())
+    };
+
+    let outside = cli(&["run", "--entry", "::tests::outside", PATH]);
+    assert_eq!(outside.status.code(), Some(1));
+    assert!(outside.stdout.is_empty());
+    let stderr = String::from_utf8(outside.stderr).unwrap();
+    assert!(stderr.contains(&location("3 2")), "{stderr}");
+    assert!(
+        stderr.contains("末尾添字 4 が入力幅 4 ビットの範囲を外れる。開始添字は 3。"),
+        "{stderr}"
+    );
+    let input_width = text.find("(bits 4)").unwrap() + "(bits ".len();
+    assert!(
+        stderr.contains(&format!(
+            "入力の幅 {PATH} [{input_width}..{}]",
+            input_width + 1
+        )),
+        "{stderr}"
+    );
+
+    let mismatch = cli(&["run", "--entry", "::tests::wrong-width", PATH]);
+    assert_eq!(mismatch.status.code(), Some(1));
+    assert!(mismatch.stdout.is_empty());
+    let stderr = String::from_utf8(mismatch.stderr).unwrap();
+    assert!(stderr.contains(&location("(bit data 1)")), "{stderr}");
+    assert!(
+        stderr.contains("幅は 1 ビットだが、入力の要求型は 2 ビット"),
+        "{stderr}"
+    );
+    let type_width = text.find("(width 2)").unwrap() + "(width ".len();
+    assert!(
+        stderr.contains(&format!(
+            "入力の型 {PATH} [{type_width}..{}]",
+            type_width + 1
+        )),
         "{stderr}"
     );
 }

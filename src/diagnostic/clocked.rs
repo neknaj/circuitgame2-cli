@@ -86,9 +86,26 @@ pub(crate) fn error(
             }
             ClockedArgumentWiringError::Unsupported(at) => {
                 format!(
-                    "{} 引数には信号名かビットリテラルを指定する。",
+                    "{} 引数には信号名、ビットリテラル、または信号を選ぶ bit・slice を指定する。",
                     located(&at)
                 )
+            }
+            ClockedArgumentWiringError::Selection(error) => module_expression(&site, error),
+            ClockedArgumentWiringError::SelectionPort {
+                argument,
+                expected,
+                required_at,
+                width,
+            } => {
+                let mut message = format!(
+                    "{} ビット選択の幅は {width} ビットだが、入力の要求型は {}。",
+                    located(&argument),
+                    port_type(expected),
+                );
+                if let Some(required_at) = required_at {
+                    message.push_str(&format!("\n  入力の型 {}", located(&required_at)));
+                }
+                message
             }
             ClockedArgumentWiringError::Wiring { argument, reason } => {
                 format!(
@@ -150,42 +167,9 @@ fn calls(site: &str, error: ModuleCallsError<'_, '_>) -> String {
             port_type(actual.ty),
             located(&actual.origin),
         ),
-        ModuleCallsError::Module(ModuleOutputTypesError::Expressions(error)) => match error {
-            ModuleSelectionsError::Argument(error)
-            | ModuleSelectionsError::Types(ModuleAliasTypesError::Sources(
-                ModuleRootTypesError::SelectionArgument(error),
-            )) => selection(error),
-            ModuleSelectionsError::Width {
-                expression,
-                width,
-                limit,
-            } => format!(
-                "{} ビット選択の結果幅 {width} が上限 {limit} を超える。",
-                located(&expression),
-            ),
-            ModuleSelectionsError::InputType { input, actual } => format!(
-                "{} ビット選択にはビット列が必要だが、型は {}。\n  入力の型 {}",
-                located(&input),
-                port_type(actual.ty),
-                located(&actual.origin),
-            ),
-            ModuleSelectionsError::Types(ModuleAliasTypesError::Sources(
-                ModuleRootTypesError::Wiring(ModuleWiringError::Undefined(at)),
-            )) => {
-                format!("{} 参照した信号が見つからない。", located(&at))
-            }
-            ModuleSelectionsError::Types(ModuleAliasTypesError::Sources(
-                ModuleRootTypesError::Wiring(ModuleWiringError::Drivers(
-                    ModuleDriverError::NeedsExpansion(at),
-                )),
-            )) => {
-                format!("{} マクロ展開が必要なため実行できない。", located(&at))
-            }
-            ModuleSelectionsError::Types(ModuleAliasTypesError::Sources(
-                ModuleRootTypesError::Call(error),
-            )) => call_ports(site, error),
-            _ => format!("{site} モジュールの型または結線に違反がある。"),
-        },
+        ModuleCallsError::Module(ModuleOutputTypesError::Expressions(error)) => {
+            module_expression(site, error)
+        }
         ModuleCallsError::Call {
             reason:
                 ModuleCallInputsError::Argument {
@@ -235,6 +219,45 @@ fn calls(site: &str, error: ModuleCallsError<'_, '_>) -> String {
     }
 }
 
+fn module_expression(site: &str, error: ModuleSelectionsError<'_, '_>) -> String {
+    match error {
+        ModuleSelectionsError::Argument(error)
+        | ModuleSelectionsError::Types(ModuleAliasTypesError::Sources(
+            ModuleRootTypesError::SelectionArgument(error),
+        )) => selection(error),
+        ModuleSelectionsError::Width {
+            expression,
+            width,
+            limit,
+        } => format!(
+            "{} ビット選択の結果幅 {width} が上限 {limit} を超える。",
+            located(&expression),
+        ),
+        ModuleSelectionsError::InputType { input, actual } => format!(
+            "{} ビット選択にはビット列が必要だが、型は {}。\n  入力の型 {}",
+            located(&input),
+            port_type(actual.ty),
+            located(&actual.origin),
+        ),
+        ModuleSelectionsError::Types(ModuleAliasTypesError::Sources(
+            ModuleRootTypesError::Wiring(ModuleWiringError::Undefined(at)),
+        )) => {
+            format!("{} 参照した信号が見つからない。", located(&at))
+        }
+        ModuleSelectionsError::Types(ModuleAliasTypesError::Sources(
+            ModuleRootTypesError::Wiring(ModuleWiringError::Drivers(
+                ModuleDriverError::NeedsExpansion(at),
+            )),
+        )) => {
+            format!("{} マクロ展開が必要なため実行できない。", located(&at))
+        }
+        ModuleSelectionsError::Types(ModuleAliasTypesError::Sources(
+            ModuleRootTypesError::Call(error),
+        )) => call_ports(site, error),
+        _ => format!("{site} モジュールの型または結線に違反がある。"),
+    }
+}
+
 fn selection(error: SelectionArgumentError<'_, '_>) -> String {
     match error {
         SelectionArgumentError::NaturalOverflow { site, argument } => format!(
@@ -254,7 +277,7 @@ fn selection(error: SelectionArgumentError<'_, '_>) -> String {
             last,
             input_width,
         } => format!(
-            "{} 選択した添字 {start}..{last} が入力幅 {input_width} ビットの範囲を外れる。\n  入力の幅 {}",
+            "{} 末尾添字 {last} が入力幅 {input_width} ビットの範囲を外れる。開始添字は {start}。\n  入力の幅 {}",
             located(&site),
             located(&width_origin),
         ),

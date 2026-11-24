@@ -51,10 +51,26 @@ cargo run --quiet --locked -- run --input 11 --input 00 examples/latch.ncg2
 - 開始点は既定で `::main`。別のモジュールは `--entry ::lib::main` のように完全修飾名で指定する。
 - `--input` 一つが 1 tick 分の入力になる。各ポートのビット順は `eval` と同じ。入力ポートがない回路は `--input=` で 1 tick 進める。`--input` をすべて省くと reset の出力だけを表示する。
 - ソースは引数に並べる。分割したモジュールは本体と `module-part` を含むファイルをすべて渡す。入力ポートの値はコマンドから直接指定する。
-- モジュールの定義の右辺では基底 NOR、ラッチ、RAM を直接呼ぶ。実引数には信号名とビットリテラルを使う。
+- モジュールの定義の右辺では基底 NOR、ラッチ、RAM を直接呼ぶ。実引数には信号名、ビットリテラル、または信号名を起点にした `bit` と `slice` を使う。
 - 型のビット幅、配線のビット数、NOR ゲート数には `eval` と同じ上限を適用する。ラッチと RAM の状態領域は合計 1,048,576 ビットが上限。RAM の容量には読み出し出力も含む。
 
 [モジュールの tick と状態素子の仕様](https://neknaj.github.io/circuitgame2/docs/simulation.html)
+
+### 信号の一部を引数に渡す
+
+[ビット選択の例題](examples/selected-latch.ncg2)では、`(slice data 0 2 2)` が `data` のビット 0 と 2 をラッチへ渡し、`(bit data 1)` が書き込み許可ビットを選ぶ。ビット 0 は最下位ビット。
+
+```sh
+cargo run --quiet --locked -- run --input 0110 --input 1000 examples/selected-latch.ncg2
+```
+
+1 tick 目でラッチに `01` を書き込む。2 tick 目は許可ビットが 0 なので `01` を保持する。
+
+```text
+0 00
+1 01
+2 01
+```
 
 ## Wasmtime で実行する
 
