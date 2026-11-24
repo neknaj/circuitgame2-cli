@@ -4,10 +4,10 @@
 
 ## インストールする
 
-Rustup と Git を用意し、順序回路の実行に対応したブランチを取得する。[ツールチェーン](rust-toolchain.toml)は Rust 1.99.1 を指定する。
+Rustup と Git を用意し、次のコマンドを実行する。[ツールチェーン](rust-toolchain.toml)は Rust 1.99.1 を指定する。
 
 ```sh
-git clone --branch stage3/lsp https://github.com/neknaj/circuitgame2-cli.git
+git clone https://github.com/neknaj/circuitgame2-cli.git
 cd circuitgame2-cli
 cargo install --path . --locked
 ncg2 --version
@@ -133,7 +133,7 @@ ncg2 run --project examples/project/circuitgame2.toml --input 0 --input 1
 
 `sources` のパスは設定ファイルがあるディレクトリからの相対パスとし、区切りには `/` を使う。`entry` を省略すると `::main` を実行する。`run --project` では、ソースファイルの列挙と `--entry` は設定ファイルにまとめる。
 
-`check --project` は設定に列挙したファイルを検査する。`eval --func … --input … --project …` も同じソース集合から、`--func` で指定した関数を評価する。この開発版で実行できるのは `.ncg2` の回路である。外部デバイスの接続を指定すると、その設定を診断する。
+`check --project` は設定に列挙したファイルを検査する。`eval --func … --input … --project …` も同じソース集合から、`--func` で指定した関数を評価する。実行できるソースは `.ncg2` の回路である。外部デバイスの接続を指定すると、その設定を診断する。
 
 ### 設定で公開した RAM を読む
 
@@ -212,7 +212,7 @@ wasmtime run --dir=. target/wasm32-wasip2/debug/ncg2.wasm eval --func ::gate --i
 wasmtime run --dir=. target/wasm32-wasip2/debug/ncg2.wasm run --input 11 --input 00 examples/latch.ncg2
 ```
 
-## エディタで構文診断を使う
+## エディタで診断と定義移動を使う
 
 ネイティブ環境でインストールすると、`ncg2` と `circuitgame2-lsp` が使える。エディタの LSP 設定で `circuitgame2-lsp` を標準入出力のサーバーとして起動し、`.ncg2` の言語 ID を `ncg2` に設定する。
 
