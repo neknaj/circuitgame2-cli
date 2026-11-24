@@ -3,11 +3,13 @@
 mod clocked;
 mod config;
 mod diagnostic;
+mod settling;
 
 use std::{
     collections::HashSet,
     env, fs,
     io::{self, Write},
+    num::NonZeroU64,
     path::{Component, Path},
     process::ExitCode,
 };
@@ -28,17 +30,20 @@ const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価して�
   circuitgame2 eval --func <関数名> --input <ビット列> --project <設定ファイル>\n\
   circuitgame2 run [--entry <モジュール名>] [--input <ビット列>]... <ファイル>...\n\
   circuitgame2 run --project <設定ファイル> [--input <ビット列>]... [--vram <公開名>]...\n\
+  circuitgame2 settle [--within <tick 数> [--period <間隔>]] [--entry <モジュール名>] <ファイル>...\n\
+  circuitgame2 settle [--within <tick 数> [--period <間隔>]] --project <設定ファイル>\n\
   circuitgame2 --help\n\
   circuitgame2 --version\n\
 \n\
 ファイルはコマンドを実行するディレクトリからの相対パスで指定する。\n\
 --project を使う場合、ソースは設定ファイルのディレクトリを基準に読む。\n\
-run の --project はソースファイルの列挙や --entry と併用できない。\n\
+run と settle の --project はソースファイルの列挙や --entry と併用できない。\n\
 宣言名には ::gate や ::lib::gate のような完全修飾名を使う。\n\
 run の既定の開始点は ::main。--input 一つにつき 1 tick 進める。\n\
 入力ポートがない回路は --input= で 1 tick 進める。\n\
 run は reset 直後を tick 0 とし、各行に tick 番号と出力ビット列を表示する。\n\
 --vram を指定すると、指定順に各 VRAM の記憶部を追加する。\n\
+settle は固定入力での定常化を解析する。ネイティブ版では未推定・未証明の終了コードは 2。\n\
 入出力はポートの宣言順に並べ、各ポート内は最下位ビットから記す。";
 
 const WIDTH_LIMIT: u64 = 65_536;
@@ -58,6 +63,11 @@ enum Command<'a> {
         entry: &'a str,
         frames: Vec<&'a str>,
         vram: Vec<&'a str>,
+        sources: SourceInput<'a>,
+    },
+    Settle {
+        entry: &'a str,
+        condition: Option<settling::Condition>,
         sources: SourceInput<'a>,
     },
 }
@@ -91,6 +101,23 @@ fn source_input(args: &[String]) -> Result<SourceInput<'_>, String> {
         return Err("--project とソースファイルの列挙は併用できない。".into());
     }
     Err("ソースファイルまたは --project を指定する。".into())
+}
+
+fn module_sources<'a>(
+    command: &str,
+    project: Option<&'a str>,
+    entry: Option<&str>,
+    files: &'a [String],
+    end_options: bool,
+) -> Result<SourceInput<'a>, String> {
+    match project {
+        Some(path) if files.is_empty() && entry.is_none() => Ok(SourceInput::Project(path)),
+        Some(_) => Err(format!(
+            "{command} の --project はソースファイルの列挙や --entry と併用できない。"
+        )),
+        None if end_options && !files.is_empty() => Ok(SourceInput::Files(files)),
+        None => source_input(files),
+    }
 }
 
 fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
@@ -150,21 +177,81 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
             _ => break,
         }
     }
-    let sources = match project {
-        Some(path) if args.is_empty() && entry.is_none() => SourceInput::Project(path),
-        Some(_) => {
-            return Err(
-                "run の --project はソースファイルの列挙や --entry と併用できない。".into(),
-            );
-        }
-        None if !vram.is_empty() => return Err("--vram を使う場合は --project を指定する。".into()),
-        None if end_options && !args.is_empty() => SourceInput::Files(args),
-        None => source_input(args)?,
-    };
+    if project.is_none() && !vram.is_empty() {
+        return Err("--vram を使う場合は --project を指定する。".into());
+    }
+    let sources = module_sources("run", project, entry, args, end_options)?;
     Ok(Command::Run {
         entry: entry.unwrap_or("::main"),
         frames,
         vram,
+        sources,
+    })
+}
+
+fn tick_count(option: &str, value: &str) -> Result<u64, String> {
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        if let Ok(value) = value.parse() {
+            return Ok(value);
+        }
+    }
+    Err(format!(
+        "{option} には 0 以上の64ビット符号なし整数を指定する。"
+    ))
+}
+
+fn settle_command(mut args: &[String]) -> Result<Command<'_>, String> {
+    let mut entry = None;
+    let mut project = None;
+    let mut within = None;
+    let mut period = None;
+    let mut end_options = false;
+    while let Some((option, rest)) = args.split_first() {
+        match option.as_str() {
+            "--entry" if entry.is_none() => {
+                let (value, rest) = option_value("--entry", rest)?;
+                entry = Some(value);
+                args = rest;
+            }
+            "--project" if project.is_none() => {
+                let (value, rest) = option_value("--project", rest)?;
+                project = Some(value);
+                args = rest;
+            }
+            "--within" if within.is_none() => {
+                let (value, rest) = option_value("--within", rest)?;
+                within = Some(tick_count("--within", value)?);
+                args = rest;
+            }
+            "--period" if period.is_none() => {
+                let (value, rest) = option_value("--period", rest)?;
+                period = Some(
+                    NonZeroU64::new(tick_count("--period", value)?)
+                        .ok_or("--period には 1 以上の間隔を指定する。")?,
+                );
+                args = rest;
+            }
+            "--" => {
+                args = rest;
+                end_options = true;
+                break;
+            }
+            _ if option.starts_with('-') => {
+                return Err(format!("settle では {option} をここに指定できない。"));
+            }
+            _ => break,
+        }
+    }
+    if period.is_some() && within.is_none() {
+        return Err("--period を指定する場合は --within も指定する。".into());
+    }
+    let sources = module_sources("settle", project, entry, args, end_options)?;
+    Ok(Command::Settle {
+        entry: entry.unwrap_or("::main"),
+        condition: within.map(|within| settling::Condition {
+            within,
+            period: period.unwrap_or(NonZeroU64::MIN),
+        }),
         sources,
     })
 }
@@ -188,6 +275,7 @@ fn command(args: &[String]) -> Result<Command<'_>, String> {
             })
         }
         [run, args @ ..] if run == "run" => run_command(args),
+        [settle, args @ ..] if settle == "settle" => settle_command(args),
         _ => Err("使い方は circuitgame2 --help で確認できる。".into()),
     }
 }
@@ -312,17 +400,23 @@ fn declaration_position(
     Ok((file, entry))
 }
 
-fn run(args: &[String], stdout: &mut impl Write) -> Result<(), String> {
+fn run(args: &[String], stdout: &mut impl Write) -> Result<ExitCode, String> {
     let command = command(args)?;
     let input = match &command {
-        Command::Help => return writeln!(stdout, "{HELP}").map_err(output_error),
+        Command::Help => {
+            return writeln!(stdout, "{HELP}")
+                .map_err(output_error)
+                .map(|()| ExitCode::SUCCESS);
+        }
         Command::Version => {
             return writeln!(stdout, "circuitgame2 {}", env!("CARGO_PKG_VERSION"))
-                .map_err(output_error);
+                .map_err(output_error)
+                .map(|()| ExitCode::SUCCESS);
         }
-        Command::Check(sources) | Command::Eval { sources, .. } | Command::Run { sources, .. } => {
-            *sources
-        }
+        Command::Check(sources)
+        | Command::Eval { sources, .. }
+        | Command::Run { sources, .. }
+        | Command::Settle { sources, .. } => *sources,
     };
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
@@ -371,7 +465,7 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<(), String> {
 
     let (name, kind) = match &command {
         Command::Eval { name, .. } => (*name, Head::Func),
-        Command::Run { entry, .. } => {
+        Command::Run { entry, .. } | Command::Settle { entry, .. } => {
             let configured = settings
                 .as_ref()
                 .and_then(|(_, settings)| settings.entry.as_ref());
@@ -382,12 +476,13 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<(), String> {
         }
         _ => {
             return writeln!(stdout, "検査成功（{} ファイル）", project.sources().len())
-                .map_err(output_error);
+                .map_err(output_error)
+                .map(|()| ExitCode::SUCCESS);
         }
     };
     let (file, entry) = declaration_position(&project, &analysis.aliases.targets, name, kind)
         .map_err(|error| match (&command, &settings) {
-            (Command::Run { .. }, Some((path, settings))) => config::at(
+            (Command::Run { .. } | Command::Settle { .. }, Some((path, settings))) => config::at(
                 path,
                 settings.entry.as_ref().map(toml::Spanned::span),
                 &error,
@@ -407,6 +502,18 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<(), String> {
                 vram: &vram,
                 settings: settings.as_ref().map(|(path, settings)| (*path, settings)),
             },
+            stdout,
+        )
+        .map(|()| ExitCode::SUCCESS);
+    }
+    if let Command::Settle { condition, .. } = command {
+        return settling::analyze(
+            &project,
+            &aliases,
+            ModuleBodyPosition { file, entry },
+            name,
+            condition,
+            &source_diagnostic,
             stdout,
         );
     }
@@ -434,7 +541,9 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<(), String> {
         .netlist()
         .evaluate(&input_bits(input))
         .map_err(|error| format!("{name} を評価できない ({error:?})。"))?;
-    writeln!(stdout, "{}", format_bits(output)).map_err(output_error)
+    writeln!(stdout, "{}", format_bits(output))
+        .map_err(output_error)
+        .map(|()| ExitCode::SUCCESS)
 }
 
 /// 入力が 0 と 1 だけで構成され、ポートの合計幅に一致することを確認する。
@@ -480,10 +589,11 @@ fn main() -> ExitCode {
         .collect::<Result<Vec<_>, _>>();
     match args.and_then(|args| {
         let mut stdout = io::stdout().lock();
-        run(&args, &mut stdout)?;
-        stdout.flush().map_err(output_error)
+        let status = run(&args, &mut stdout)?;
+        stdout.flush().map_err(output_error)?;
+        Ok(status)
     }) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(status) => status,
         Err(error) => {
             let _ = writeln!(io::stderr().lock(), "{error}");
             ExitCode::FAILURE

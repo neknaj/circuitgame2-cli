@@ -15,6 +15,91 @@ fn cli(args: &[&str]) -> Output {
 }
 
 #[test]
+fn settling_uses_the_project_entry_and_distinguishes_unproved_conditions() {
+    let project = "examples/project/circuitgame2.toml";
+    let automatic = cli(&["settle", "--project", project]);
+    assert_eq!(automatic.status.code(), Some(0));
+    assert!(automatic.stderr.is_empty());
+    assert!(
+        String::from_utf8(automatic.stdout)
+            .unwrap()
+            .contains("推定上界 1 tick")
+    );
+
+    let verified = cli(&[
+        "settle",
+        "--project",
+        project,
+        "--within",
+        "1",
+        "--period",
+        "18446744073709551615",
+    ]);
+    assert_eq!(verified.status.code(), Some(0));
+    assert!(verified.stderr.is_empty());
+    let result = String::from_utf8(verified.stdout).unwrap();
+    assert!(
+        result.contains("検証済み") && result.contains("18446744073709551615 tick"),
+        "{result}"
+    );
+
+    let unproved = cli(&["settle", "--project", project, "--within", "0"]);
+    assert_eq!(unproved.status.code(), Some(2));
+    assert!(unproved.stderr.is_empty());
+    assert!(
+        String::from_utf8(unproved.stdout)
+            .unwrap()
+            .contains("未証明")
+    );
+}
+
+#[test]
+fn settling_reports_clocks_with_storage_or_feedback_as_unestimated() {
+    let cases = [
+        &["settle", "--project", "examples/vram/circuitgame2.toml"][..],
+        &[
+            "settle",
+            "--entry",
+            "::tests::oscillator",
+            "tests/fixtures/clocked.ncg2",
+        ][..],
+    ];
+    for args in cases {
+        let result = cli(args);
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.stderr.is_empty());
+        assert!(String::from_utf8(result.stdout).unwrap().contains("未推定"));
+    }
+}
+
+#[test]
+fn settling_rejects_invalid_conditions_before_reading_sources() {
+    let cases = [
+        ("--period", "2", "--within も指定する"),
+        ("--within", "18446744073709551616", "64ビット符号なし整数"),
+    ];
+    for (option, value, expected) in cases {
+        let result = cli(&["settle", option, value, "missing.ncg2"]);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stdout.is_empty());
+        assert!(String::from_utf8(result.stderr).unwrap().contains(expected));
+    }
+    let result = cli(&["settle", "--within", "1", "--period", "0", "missing.ncg2"]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    assert!(
+        String::from_utf8(result.stderr)
+            .unwrap()
+            .contains("1 以上の間隔")
+    );
+}
+
+#[test]
 fn project_sources_are_relative_to_the_settings_file() {
     let project = "examples/project/circuitgame2.toml";
     let trace = cli(&["run", "--project", project, "--input", "0", "--input", "1"]);

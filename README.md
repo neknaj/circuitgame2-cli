@@ -153,6 +153,27 @@ circuitgame2 run --project examples/vram/circuitgame2.toml --vram screen --input
 
 `--vram` を複数指定した場合は、指定順に列を追加する。公開名が `-` で始まる場合は `--vram=-screen` の形で指定する。`run --project` は `--vram` を省いた場合も、設定された読み出し信号を検査する。
 
+## 定常化を調べる
+
+入力を固定したときの定常化までの上界を `settle` で求める。同じ回路を CI で確認するときは、上限の tick 数を `--within` で指定する。
+
+```sh
+circuitgame2 settle --project examples/project/circuitgame2.toml
+circuitgame2 settle --project examples/project/circuitgame2.toml --within 1 --period 2
+```
+
+例題の上界は 1 tick。条件を指定した実行では、1 tick 後から 2 tick 間隔で同じ内部状態になることを確認する。`--period` を省略すると間隔は 1 になる。
+
+ネイティブ版の終了コードは次のとおり。
+
+- 終了コード `0` は上界を推定できたか、指定した条件を検証できたことを表す。
+- 終了コード `2` は、状態素子や閉路があるため上界を推定できない場合と、指定した条件を上界から証明できない場合に返す。
+- 終了コード `1` は引数、設定、回路ソース、入出力のエラーを表す。
+
+`settle` はゲートの深さから上界を求める。反例の探索は行わない。`wasm32-wasip2` 版を Wasmtime で実行すると、未推定・未証明と通常のエラーはどちらも終了コード `1` になる。未推定・未証明の報告は標準出力、通常のエラーは標準エラー出力に書く。
+
+`--project` は設定のソース一覧と `entry` を使う。ファイルを直接指定するときは `--entry ::main` のように開始点を選べる。公開 VRAM と読み出し信号の対応は `run --project` で検査する。
+
 ## 自分のファイルを使う
 
 [ラッチの例題](examples/latch.ncg2)を自分の回路用ディレクトリに `main.ncg2` として保存する。そのディレクトリへ移動して、インストールした CLI を実行する。

@@ -12,7 +12,7 @@ use super::{
     validate_input,
 };
 
-const LIMITS: ClockedModuleVmLimits = ClockedModuleVmLimits {
+pub(super) const LIMITS: ClockedModuleVmLimits = ClockedModuleVmLimits {
     width: WIDTH_LIMIT,
     wiring_bits: BIT_LIMIT,
     gates: GATE_LIMIT,
