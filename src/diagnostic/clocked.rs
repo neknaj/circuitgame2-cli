@@ -15,11 +15,25 @@ use circuitgame2_core::{
         ModuleRootTypesError, ModuleSelectionsError, ModuleWiringError, OutputDriver,
         PrimitiveModuleError, ResolvedPortType, SelectionArgumentError, StructureLayoutError,
         StructureNumber, StructureNumberErrorKind, StructurePlacementError,
-        StructureResolutionError, StructureTypeError,
+        StructureResolutionError, StructureTypeError, VramOutputError,
     },
 };
 
 use super::{expansion_error, located, position, reference_reason};
+
+/// 設定の読み出し信号に対応する違反と、回路側の関連範囲を表示する。
+pub(crate) fn vram_output_error(error: VramOutputError<'_, '_>) -> String {
+    match error {
+        VramOutputError::Module(error) => calls("VRAM の対象モジュール", error),
+        VramOutputError::MissingDefinition => {
+            "read-output が指定する信号の定義が見つからない。".into()
+        }
+        VramOutputError::NotDirectMemory(site) => format!(
+            "read-output にはルート本体で RAM を直接呼んだ定義の出力名を指定する。\n  回路側の定義 {}",
+            located(&site),
+        ),
+    }
+}
 
 /// 変換段階と違反のある位置を表示する。Core が返す関連範囲も添える。
 pub(crate) fn error(

@@ -100,10 +100,6 @@ fn project_settings_errors_have_utf8_byte_ranges() {
             "設定を解釈できない",
         ),
         (
-            "sources = [\"main.ncg2\"]\n[[vram]]\nname = \"screen\"\nread-output = \"fb\"\n",
-            "VRAM の公開に未対応",
-        ),
-        (
             "sources = [\"main.ncg2\"]\n[[device]]\nname = \"uart\"\nkind = \"uart-terminal\"\nbindings = {}\n",
             "外部デバイスの接続に未対応",
         ),
@@ -143,6 +139,84 @@ fn project_source_diagnostics_show_the_settings_location() {
     let error = String::from_utf8(result.stderr).unwrap();
     assert!(error.contains(settings.to_str().unwrap()), "{error}");
     assert!(error.contains("local.ncg2 [11..12]"), "{error}");
+
+    let config = "# 公開する信号\nsources = [\"local.ncg2\"]\n[[vram]]\nname = \"screen\"\nread-output = \"alias\"\n";
+    fs::write(&settings, config).unwrap();
+    fs::write(
+        fixture.0.join("local.ncg2"),
+        "(using nor) (memory ram (address 1) (data (bits 1))) (module main (in a d w) (out alias) (def read-data (ram a d w)) (def alias read-data))",
+    ).unwrap();
+    let result = cli(&["run", "--project", settings.to_str().unwrap()]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    let start = config.find("\"alias\"").unwrap();
+    let end = start + "\"alias\"".len();
+    let error = String::from_utf8(result.stderr).unwrap();
+    assert!(
+        error.contains(&format!("{}[{start}..{end}]", settings.display())),
+        "{error}"
+    );
+    assert!(error.contains("回路側の定義 local.ncg2 ["), "{error}");
+}
+
+#[test]
+fn project_vram_reports_committed_memory_after_each_tick() {
+    let project = "examples/vram/circuitgame2.toml";
+    let run = [
+        "run",
+        "--project",
+        project,
+        "--input",
+        "1101",
+        "--input",
+        "1000",
+    ];
+    for selection in [&["--vram", "screen"][..], &["--vram=screen"][..]] {
+        let mut with_vram = run.to_vec();
+        with_vram.extend(selection);
+        let trace = cli(&with_vram);
+        assert!(
+            trace.status.success(),
+            "{}",
+            String::from_utf8_lossy(&trace.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(trace.stdout)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["0 00 0000", "1 00 0010", "2 10 0010"]
+        );
+    }
+    let trace = cli(&run);
+    assert!(
+        trace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trace.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(trace.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["0 00", "1 00", "2 10"]
+    );
+    let missing = cli(&[
+        "run",
+        "--project",
+        project,
+        "--vram",
+        "screen",
+        "--vram",
+        "unknown",
+    ]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(missing.stdout.is_empty());
+    assert!(
+        String::from_utf8(missing.stderr)
+            .unwrap()
+            .contains("公開 VRAM \"unknown\"")
+    );
 }
 
 #[test]

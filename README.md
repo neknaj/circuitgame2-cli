@@ -133,7 +133,25 @@ circuitgame2 run --project examples/project/circuitgame2.toml --input 0 --input 
 
 `sources` のパスは設定ファイルがあるディレクトリからの相対パスとし、区切りには `/` を使う。`entry` を省略すると `::main` を実行する。`run --project` では、ソースファイルの列挙と `--entry` は設定ファイルにまとめる。
 
-`check --project` は設定に列挙したファイルを検査する。`eval --func … --input … --project …` も同じソース集合から、`--func` で指定した関数を評価する。この開発版で実行できるのは `.ncg2` の回路である。外部デバイスの接続や VRAM の公開を指定すると、その設定を診断する。
+`check --project` は設定に列挙したファイルを検査する。`eval --func … --input … --project …` も同じソース集合から、`--func` で指定した関数を評価する。この開発版で実行できるのは `.ncg2` の回路である。外部デバイスの接続を指定すると、その設定を診断する。
+
+### 設定で公開した RAM を読む
+
+[VRAM の例題](examples/vram/circuitgame2.toml)は、読み出し信号 `read-data` を公開名 `screen` に対応付ける。`--vram` を指定すると、回路の出力の後ろに RAM の全記憶を表示する。
+
+```sh
+circuitgame2 run --project examples/vram/circuitgame2.toml --vram screen --input 1101 --input 1000
+```
+
+```text
+0 00 0000
+1 00 0010
+2 10 0010
+```
+
+3 列目は、その tick が確定した時点の記憶部である。各語のビットを最下位から並べ、語をアドレス順につなぐ。1 tick 目の回路出力は書き込み前の語を示す。同じ行の VRAM 列は書き込み後の内容を示す。
+
+`--vram` を複数指定した場合は、指定順に列を追加する。公開名が `-` で始まる場合は `--vram=-screen` の形で指定する。`run --project` は `--vram` を省いた場合も、設定された読み出し信号を検査する。
 
 ## 自分のファイルを使う
 

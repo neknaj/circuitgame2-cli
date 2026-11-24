@@ -27,7 +27,7 @@ const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価して�
   circuitgame2 eval --func <関数名> --input <ビット列> <ファイル>...\n\
   circuitgame2 eval --func <関数名> --input <ビット列> --project <設定ファイル>\n\
   circuitgame2 run [--entry <モジュール名>] [--input <ビット列>]... <ファイル>...\n\
-  circuitgame2 run --project <設定ファイル> [--input <ビット列>]...\n\
+  circuitgame2 run --project <設定ファイル> [--input <ビット列>]... [--vram <公開名>]...\n\
   circuitgame2 --help\n\
   circuitgame2 --version\n\
 \n\
@@ -38,6 +38,7 @@ run の --project はソースファイルの列挙や --entry と併用でき�
 run の既定の開始点は ::main。--input 一つにつき 1 tick 進める。\n\
 入力ポートがない回路は --input= で 1 tick 進める。\n\
 run は reset 直後を tick 0 とし、各行に tick 番号と出力ビット列を表示する。\n\
+--vram を指定すると、指定順に各 VRAM の記憶部を追加する。\n\
 入出力はポートの宣言順に並べ、各ポート内は最下位ビットから記す。";
 
 const WIDTH_LIMIT: u64 = 65_536;
@@ -56,6 +57,7 @@ enum Command<'a> {
     Run {
         entry: &'a str,
         frames: Vec<&'a str>,
+        vram: Vec<&'a str>,
         sources: SourceInput<'a>,
     },
 }
@@ -95,13 +97,16 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
     let mut entry = None;
     let mut project = None;
     let mut frames = Vec::new();
+    let mut vram = Vec::new();
     let mut end_options = false;
     while let Some((option, rest)) = args.split_first() {
         match option.as_str() {
             "--entry" if entry.is_none() => {
                 let (name, rest) = rest
                     .split_first()
-                    .filter(|(value, _)| *value != "--project")
+                    .filter(|(value, _)| {
+                        *value != "--project" && *value != "--vram" && !value.starts_with("--vram=")
+                    })
                     .ok_or("--entry には宣言名を指定する。")?;
                 entry = Some(name.as_str());
                 args = rest;
@@ -114,13 +119,24 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
             "--input" => {
                 let (frame, rest) = rest
                     .split_first()
-                    .filter(|(value, _)| *value != "--project")
+                    .filter(|(value, _)| {
+                        *value != "--project" && *value != "--vram" && !value.starts_with("--vram=")
+                    })
                     .ok_or("--input にはビット列を指定する。")?;
                 frames.push(frame.as_str());
                 args = rest;
             }
             "--input=" => {
                 frames.push("");
+                args = rest;
+            }
+            "--vram" => {
+                let (name, rest) = option_value("--vram", rest)?;
+                vram.push(name);
+                args = rest;
+            }
+            option if option.starts_with("--vram=") => {
+                vram.push(&option["--vram=".len()..]);
                 args = rest;
             }
             "--" => {
@@ -141,12 +157,14 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
                 "run の --project はソースファイルの列挙や --entry と併用できない。".into(),
             );
         }
+        None if !vram.is_empty() => return Err("--vram を使う場合は --project を指定する。".into()),
         None if end_options && !args.is_empty() => SourceInput::Files(args),
         None => source_input(args)?,
     };
     Ok(Command::Run {
         entry: entry.unwrap_or("::main"),
         frames,
+        vram,
         sources,
     })
 }
@@ -378,14 +396,17 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<(), String> {
         })?;
     let aliases = check_use_aliases(&analysis.aliases.targets)
         .map_err(|error| source_diagnostic(diagnostic::alias_error(error)))?;
-    if let Command::Run { frames, .. } = command {
+    if let Command::Run { frames, vram, .. } = command {
         return clocked::trace(
             &project,
             &aliases,
             ModuleBodyPosition { file, entry },
-            name,
-            &frames,
-            &source_diagnostic,
+            clocked::TraceOptions {
+                name,
+                frames: &frames,
+                vram: &vram,
+                settings: settings.as_ref().map(|(path, settings)| (*path, settings)),
+            },
             stdout,
         );
     }
@@ -439,7 +460,7 @@ fn input_bits(input: &str) -> Vec<bool> {
     input.bytes().map(|bit| bit == b'1').collect()
 }
 
-fn format_bits(bits: Vec<bool>) -> String {
+fn format_bits(bits: impl IntoIterator<Item = bool>) -> String {
     bits.into_iter()
         .map(|bit| if bit { '1' } else { '0' })
         .collect()

@@ -1,0 +1,5 @@
+sources = ["main.ncg2"]
+
+[[vram]]
+name = "screen"
+read-output = "read-data"

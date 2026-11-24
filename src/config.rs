@@ -16,7 +16,7 @@ pub(super) struct ProjectConfig {
     #[serde(default)]
     device: Vec<Spanned<Device>>,
     #[serde(default)]
-    vram: Vec<Spanned<Vram>>,
+    pub(super) vram: Vec<Vram>,
 }
 
 #[derive(Deserialize)]
@@ -42,12 +42,10 @@ struct Device {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Vram {
-    #[serde(rename = "name")]
-    _name: String,
-    #[serde(rename = "read-output")]
-    _read_output: String,
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub(super) struct Vram {
+    pub(super) name: String,
+    pub(super) read_output: Spanned<String>,
 }
 
 /// 設定ファイル名と、原文の UTF-8 バイト範囲を診断に付ける。
@@ -95,13 +93,6 @@ pub(super) fn read(path: &Path) -> Result<ProjectConfig, String> {
             path,
             Some(device.span()),
             "この CLI は外部デバイスの接続に未対応。",
-        ));
-    }
-    if let Some(vram) = config.vram.first() {
-        return Err(at(
-            path,
-            Some(vram.span()),
-            "この CLI は設定からの VRAM の公開に未対応。",
         ));
     }
     Ok(config)
