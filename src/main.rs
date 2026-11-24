@@ -20,10 +20,10 @@ use circuitgame2_core::{
 
 const HELP: &str = "NCG2 の回路ソースを検査し、組み合わせ関数を評価する。\n\
 \n\
-  circuitgame2 check <ファイル>...\n\
-  circuitgame2 eval --func <関数名> --input <ビット列> <ファイル>...\n\
-  circuitgame2 --help\n\
-  circuitgame2 --version\n\
+  ncg2 check <ファイル>...\n\
+  ncg2 eval --func <関数名> --input <ビット列> <ファイル>...\n\
+  ncg2 --help\n\
+  ncg2 --version\n\
 \n\
 ファイルはプロジェクトルートからの相対パスで指定する。\n\
 関数名には ::gate や ::lib::gate のような完全修飾名を使う。\n\
@@ -57,7 +57,7 @@ fn command(args: &[String]) -> Result<Command<'_>, String> {
         {
             Ok(Command::Eval { name, input, files })
         }
-        _ => Err("使い方は circuitgame2 --help で確認できる。".into()),
+        _ => Err("使い方は ncg2 --help で確認できる。".into()),
     }
 }
 
@@ -137,7 +137,7 @@ fn run(args: &[String]) -> Result<String, String> {
     let command = command(args)?;
     let files = match &command {
         Command::Help => return Ok(HELP.into()),
-        Command::Version => return Ok(format!("circuitgame2 {}", env!("CARGO_PKG_VERSION"))),
+        Command::Version => return Ok(format!("ncg2 {}", env!("CARGO_PKG_VERSION"))),
         Command::Check(files) | Command::Eval { files, .. } => *files,
     };
     let mut seen = HashSet::new();

@@ -4,7 +4,7 @@ use std::{
     process::{Command, Output},
 };
 
-const BIN: &str = env!("CARGO_BIN_EXE_circuitgame2");
+const BIN: &str = env!("CARGO_BIN_EXE_ncg2");
 
 fn cli(args: &[&str]) -> Output {
     Command::new(BIN)

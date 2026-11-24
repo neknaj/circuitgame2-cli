@@ -1,8 +1,8 @@
 # circuitgame2-cli
 
-NCG2 の回路ソースをコマンドラインで検査し、組み合わせ関数を評価する。
+`ncg2` は neknaj circuit game 2 の回路ソースを扱う CLI。ソースの検査と組み合わせ関数の評価ができる。
 
-ラッチや RAM を含む順序回路を動かすには、開発版のインストール手順を使う。[順序回路に対応した開発版の README](https://github.com/neknaj/circuitgame2-cli/tree/c88e49df1d1beb5f644d595b689c8d99d01c7f9e#readme)
+ラッチや RAM を含む順序回路を動かすには、開発版のインストール手順を使う。[順序回路に対応した開発版の README](https://github.com/neknaj/circuitgame2-cli/tree/5a1a9d2669c31518fd77a0b1872be3c485c79ad6#readme)
 
 ## インストールして NOR を試す
 
@@ -12,12 +12,12 @@ Rustup と Git を用意し、次のコマンドを実行する。[ツールチ�
 git clone https://github.com/neknaj/circuitgame2-cli.git
 cd circuitgame2-cli
 cargo install --path . --locked
-circuitgame2 --version
-circuitgame2 check examples/nor.ncg2
-circuitgame2 eval --func ::gate --input 00 examples/nor.ncg2
+ncg2 --version
+ncg2 check examples/nor.ncg2
+ncg2 eval --func ::gate --input 00 examples/nor.ncg2
 ```
 
-`circuitgame2` が見つからない場合は、Cargo が表示した実行ファイルの保存先を `PATH` に加える。
+`ncg2` が見つからない場合は、Cargo が表示した実行ファイルの保存先を `PATH` に加える。
 
 [例題](examples/nor.ncg2)の検査に成功すると `検査成功（1 ファイル）` と表示される。`eval` は `::gate` に 0 と 0 を入力し、NOR の出力 `1` を表示する。`--input 01` では `0` が返る。
 
@@ -26,8 +26,8 @@ circuitgame2 eval --func ::gate --input 00 examples/nor.ncg2
 回路プロジェクトのルートへ移動し、使う UTF-8 の `.ncg2` ファイルを相対パスで並べる。プロジェクト全体で `(using nor)` を一つ指定する。
 
 ```sh
-circuitgame2 check gates.ncg2 main.ncg2
-circuitgame2 eval --func ::lib::gate --input 01 gates.ncg2 main.ncg2
+ncg2 check gates.ncg2 main.ncg2
+ncg2 eval --func ::lib::gate --input 01 gates.ncg2 main.ncg2
 ```
 
 - `check` は構文、基底指定、宣言と公開指定、別名、定義内の参照を検査する。
@@ -43,8 +43,8 @@ CLI リポジトリのルートで WASI 向けにビルドし、Wasmtime で実�
 ```sh
 rustup target add wasm32-wasip2
 cargo build --locked --target wasm32-wasip2
-wasmtime run --dir=. target/wasm32-wasip2/debug/circuitgame2.wasm check examples/nor.ncg2
-wasmtime run --dir=. target/wasm32-wasip2/debug/circuitgame2.wasm eval --func ::gate --input 00 examples/nor.ncg2
+wasmtime run --dir=. target/wasm32-wasip2/debug/ncg2.wasm check examples/nor.ncg2
+wasmtime run --dir=. target/wasm32-wasip2/debug/ncg2.wasm eval --func ::gate --input 00 examples/nor.ncg2
 ```
 
 ## 開発
