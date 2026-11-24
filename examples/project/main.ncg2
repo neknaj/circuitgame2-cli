@@ -1,0 +1,6 @@
+(namespace demo
+  (export gate invert)
+  (module gate (in x) (out q)
+    (def q (nor x x)))
+  (func invert (in x) (out y)
+    (def y (nor x x))))

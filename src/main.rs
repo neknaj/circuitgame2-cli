@@ -1,6 +1,7 @@
 //! UTF-8 の NCG2 ファイルを読み込み、回路を検査・評価・実行する。
 
 mod clocked;
+mod config;
 mod diagnostic;
 
 use std::{
@@ -22,12 +23,17 @@ use circuitgame2_core::{
 const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価してモジュールを実行する。\n\
 \n\
   circuitgame2 check <ファイル>...\n\
+  circuitgame2 check --project <設定ファイル>\n\
   circuitgame2 eval --func <関数名> --input <ビット列> <ファイル>...\n\
+  circuitgame2 eval --func <関数名> --input <ビット列> --project <設定ファイル>\n\
   circuitgame2 run [--entry <モジュール名>] [--input <ビット列>]... <ファイル>...\n\
+  circuitgame2 run --project <設定ファイル> [--input <ビット列>]...\n\
   circuitgame2 --help\n\
   circuitgame2 --version\n\
 \n\
 ファイルはコマンドを実行するディレクトリからの相対パスで指定する。\n\
+--project を使う場合、ソースは設定ファイルのディレクトリを基準に読む。\n\
+run の --project はソースファイルの列挙や --entry と併用できない。\n\
 宣言名には ::gate や ::lib::gate のような完全修飾名を使う。\n\
 run の既定の開始点は ::main。--input 一つにつき 1 tick 進める。\n\
 入力ポートがない回路は --input= で 1 tick 進める。\n\
@@ -41,32 +47,74 @@ const GATE_LIMIT: usize = 1_048_576;
 enum Command<'a> {
     Help,
     Version,
-    Check(&'a [String]),
+    Check(SourceInput<'a>),
     Eval {
         name: &'a str,
         input: &'a str,
-        files: &'a [String],
+        sources: SourceInput<'a>,
     },
     Run {
         entry: &'a str,
         frames: Vec<&'a str>,
-        files: &'a [String],
+        sources: SourceInput<'a>,
     },
+}
+
+#[derive(Clone, Copy)]
+enum SourceInput<'a> {
+    Files(&'a [String]),
+    Project(&'a str),
+}
+
+fn option_value<'a>(option: &str, args: &'a [String]) -> Result<(&'a str, &'a [String]), String> {
+    match args.split_first() {
+        Some((value, rest)) if !value.starts_with('-') => Ok((value, rest)),
+        _ => Err(format!("{option} の値を指定する。")),
+    }
+}
+
+fn source_input(args: &[String]) -> Result<SourceInput<'_>, String> {
+    if let Some((first, rest)) = args.split_first() {
+        match first.as_str() {
+            "--project" => {
+                let (path, remaining) = option_value("--project", rest)?;
+                if remaining.is_empty() {
+                    return Ok(SourceInput::Project(path));
+                }
+            }
+            "--" if !rest.is_empty() => return Ok(SourceInput::Files(rest)),
+            _ if !args.iter().any(|arg| arg == "--project") => return Ok(SourceInput::Files(args)),
+            _ => {}
+        }
+        return Err("--project とソースファイルの列挙は併用できない。".into());
+    }
+    Err("ソースファイルまたは --project を指定する。".into())
 }
 
 fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
     let mut entry = None;
+    let mut project = None;
     let mut frames = Vec::new();
+    let mut end_options = false;
     while let Some((option, rest)) = args.split_first() {
         match option.as_str() {
             "--entry" if entry.is_none() => {
-                let (name, rest) = rest.split_first().ok_or("--entry には宣言名を指定する。")?;
+                let (name, rest) = rest
+                    .split_first()
+                    .filter(|(value, _)| *value != "--project")
+                    .ok_or("--entry には宣言名を指定する。")?;
                 entry = Some(name.as_str());
+                args = rest;
+            }
+            "--project" if project.is_none() => {
+                let (path, rest) = option_value("--project", rest)?;
+                project = Some(path);
                 args = rest;
             }
             "--input" => {
                 let (frame, rest) = rest
                     .split_first()
+                    .filter(|(value, _)| *value != "--project")
                     .ok_or("--input にはビット列を指定する。")?;
                 frames.push(frame.as_str());
                 args = rest;
@@ -77,6 +125,7 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
             }
             "--" => {
                 args = rest;
+                end_options = true;
                 break;
             }
             _ if option.starts_with('-') => {
@@ -85,13 +134,20 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
             _ => break,
         }
     }
-    if args.is_empty() {
-        return Err("run には 1 件以上のソースファイルを指定する。".into());
-    }
+    let sources = match project {
+        Some(path) if args.is_empty() && entry.is_none() => SourceInput::Project(path),
+        Some(_) => {
+            return Err(
+                "run の --project はソースファイルの列挙や --entry と併用できない。".into(),
+            );
+        }
+        None if end_options && !args.is_empty() => SourceInput::Files(args),
+        None => source_input(args)?,
+    };
     Ok(Command::Run {
         entry: entry.unwrap_or("::main"),
         frames,
-        files: args,
+        sources,
     })
 }
 
@@ -99,22 +155,60 @@ fn command(args: &[String]) -> Result<Command<'_>, String> {
     match args {
         [flag] if flag == "--help" || flag == "-h" => Ok(Command::Help),
         [flag] if flag == "--version" => Ok(Command::Version),
-        [check, files @ ..] if check == "check" && !files.is_empty() => Ok(Command::Check(files)),
+        [check, files @ ..] if check == "check" => Ok(Command::Check(source_input(files)?)),
         [eval, func_flag, name, input_flag, input, files @ ..]
             if eval == "eval"
                 && func_flag == "--func"
                 && input_flag == "--input"
+                && input != "--project"
                 && !files.is_empty() =>
         {
-            Ok(Command::Eval { name, input, files })
+            Ok(Command::Eval {
+                name,
+                input,
+                sources: source_input(files)?,
+            })
         }
         [run, args @ ..] if run == "run" => run_command(args),
         _ => Err("使い方は circuitgame2 --help で確認できる。".into()),
     }
 }
 
-fn source_path(path: &str) -> Result<String, String> {
-    if Path::new(path)
+fn source_path(path: &str, from_config: bool) -> Result<String, String> {
+    if !from_config
+        && Path::new(path)
+            .components()
+            .any(|component| matches!(component, Component::Prefix(_) | Component::RootDir))
+    {
+        return Err(format!(
+            "{path} はプロジェクトルートからの相対パスで指定する。"
+        ));
+    }
+    let path = if cfg!(windows) && !from_config {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    };
+    let id = normalize_path(&path)
+        .map_err(|error| format!("{path} のパスを正規化できない ({error:?})。"))?;
+    match id.source_kind() {
+        Some(SourceKind::Circuit) => {}
+        Some(SourceKind::Functional) if from_config => {
+            return Err(format!(
+                "{path} は NCG2M のソース。この CLI は NCG2M の実行に未対応。"
+            ));
+        }
+        _ if from_config => {
+            return Err(format!(
+                "{path} の拡張子には .ncg2 または .ncg2m を指定する。"
+            ));
+        }
+        _ => return Err(format!("{path} の拡張子には .ncg2 を指定する。")),
+    }
+
+    // 正規化で Windows のドライブ指定が先頭に現れる場合も、相対パスとして扱わない。
+    let normalized = id.components().join("/");
+    if Path::new(&normalized)
         .components()
         .any(|component| matches!(component, Component::Prefix(_) | Component::RootDir))
     {
@@ -122,19 +216,28 @@ fn source_path(path: &str) -> Result<String, String> {
             "{path} はプロジェクトルートからの相対パスで指定する。"
         ));
     }
-    let path = if cfg!(windows) {
-        path.replace('\\', "/")
-    } else {
-        path.to_owned()
-    };
-    let id = normalize_path(&path)
-        .map_err(|error| format!("{path} のパスを正規化できない ({error:?})。"))?;
-    if id.source_kind() != Some(SourceKind::Circuit) {
-        return Err(format!("{path} の拡張子には .ncg2 を指定する。"));
-    }
+    Ok(normalized)
+}
 
-    // 診断のパスからも同じファイルを開けるよう、正規化したパスで読み込む。
-    Ok(id.components().join("/"))
+/// 正規化後のパスが同じソースは、最初の指定だけを読み込む。
+fn read_source(
+    sources: &mut Vec<(String, String)>,
+    seen: &mut HashSet<String>,
+    base: &Path,
+    path: String,
+) -> Result<(), String> {
+    if !seen.contains(&path) {
+        let host_path = base.join(&path);
+        let text = fs::read_to_string(&host_path).map_err(|error| {
+            format!(
+                "{} を UTF-8 で読み込めない ({error})。",
+                host_path.display()
+            )
+        })?;
+        seen.insert(path.clone());
+        sources.push((path, text));
+    }
+    Ok(())
 }
 
 fn declaration_position(
@@ -193,24 +296,42 @@ fn declaration_position(
 
 fn run(args: &[String], stdout: &mut impl Write) -> Result<(), String> {
     let command = command(args)?;
-    let files = match &command {
+    let input = match &command {
         Command::Help => return writeln!(stdout, "{HELP}").map_err(output_error),
         Command::Version => {
             return writeln!(stdout, "circuitgame2 {}", env!("CARGO_PKG_VERSION"))
                 .map_err(output_error);
         }
-        Command::Check(files) | Command::Eval { files, .. } | Command::Run { files, .. } => *files,
+        Command::Check(sources) | Command::Eval { sources, .. } | Command::Run { sources, .. } => {
+            *sources
+        }
     };
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
-    for path in files {
-        let path = source_path(path)?;
-        if seen.insert(path.clone()) {
-            let text = fs::read_to_string(&path)
-                .map_err(|error| format!("{path} を UTF-8 で読み込めない ({error})。"))?;
-            sources.push((path, text));
+    let settings = match input {
+        SourceInput::Files(files) => {
+            for path in files {
+                read_source(
+                    &mut sources,
+                    &mut seen,
+                    Path::new(""),
+                    source_path(path, false)?,
+                )?;
+            }
+            None
         }
-    }
+        SourceInput::Project(path) => {
+            let path = Path::new(path);
+            let settings = config::read(path)?;
+            let base = path.parent().unwrap_or(Path::new(""));
+            for value in settings.sources.get_ref() {
+                let result = source_path(value.get_ref(), true)
+                    .and_then(|source| read_source(&mut sources, &mut seen, base, source));
+                result.map_err(|error| config::at(path, Some(value.span()), &error))?;
+            }
+            Some((path, settings))
+        }
+    };
     let snapshots: Vec<_> = sources
         .iter()
         .map(|(path, text)| SourceSnapshot {
@@ -219,20 +340,44 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<(), String> {
             text,
         })
         .collect();
-    let project = parse_circuit_project(&snapshots).map_err(diagnostic::project_error)?;
-    let analysis = analyze_definitions(&project).map_err(diagnostic::analysis_error)?;
-    diagnostic::alias_warnings(&analysis.aliases);
+    let source_diagnostic = |message: String| match &settings {
+        Some((path, _)) => config::source_diagnostic(path, &message),
+        None => message,
+    };
+    let project = parse_circuit_project(&snapshots)
+        .map_err(|error| source_diagnostic(diagnostic::project_error(error)))?;
+    let analysis = analyze_definitions(&project).map_err(|error| {
+        source_diagnostic(diagnostic::analysis_error(error, &source_diagnostic))
+    })?;
+    diagnostic::alias_warnings(&analysis.aliases, &source_diagnostic);
 
     let (name, kind) = match &command {
         Command::Eval { name, .. } => (*name, Head::Func),
-        Command::Run { entry, .. } => (*entry, Head::Module),
+        Command::Run { entry, .. } => {
+            let configured = settings
+                .as_ref()
+                .and_then(|(_, settings)| settings.entry.as_ref());
+            (
+                configured.map_or(*entry, |entry| entry.get_ref()),
+                Head::Module,
+            )
+        }
         _ => {
             return writeln!(stdout, "検査成功（{} ファイル）", project.sources().len())
                 .map_err(output_error);
         }
     };
-    let (file, entry) = declaration_position(&project, &analysis.aliases.targets, name, kind)?;
-    let aliases = check_use_aliases(&analysis.aliases.targets).map_err(diagnostic::alias_error)?;
+    let (file, entry) = declaration_position(&project, &analysis.aliases.targets, name, kind)
+        .map_err(|error| match (&command, &settings) {
+            (Command::Run { .. }, Some((path, settings))) => config::at(
+                path,
+                settings.entry.as_ref().map(toml::Spanned::span),
+                &error,
+            ),
+            _ => error,
+        })?;
+    let aliases = check_use_aliases(&analysis.aliases.targets)
+        .map_err(|error| source_diagnostic(diagnostic::alias_error(error)))?;
     if let Command::Run { frames, .. } = command {
         return clocked::trace(
             &project,
@@ -240,6 +385,7 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<(), String> {
             ModuleBodyPosition { file, entry },
             name,
             &frames,
+            &source_diagnostic,
             stdout,
         );
     }
@@ -248,7 +394,7 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<(), String> {
     };
     let functions = aliases
         .expand_functions(WIDTH_LIMIT, BIT_LIMIT, GATE_LIMIT)
-        .map_err(|error| diagnostic::expansion_error(&project, error))?;
+        .map_err(|error| source_diagnostic(diagnostic::expansion_error(&project, error)))?;
     let function = functions
         .get(file, entry)
         .ok_or_else(|| format!("{name} の展開結果が見つからない。"))?;

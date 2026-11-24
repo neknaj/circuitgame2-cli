@@ -27,11 +27,14 @@ pub(super) fn trace(
     position: ModuleBodyPosition,
     name: &str,
     frames: &[&str],
+    source_diagnostic: impl Fn(String) -> String,
     stdout: &mut impl Write,
 ) -> Result<(), String> {
     let mut compiled = aliases
         .lower_clocked_vm(position, LIMITS)
-        .map_err(|error| diagnostic::clocked::error(project, position, name, error))?
+        .map_err(|error| {
+            source_diagnostic(diagnostic::clocked::error(project, position, name, error))
+        })?
         .ok_or_else(|| format!("{name} のモジュールを実行できない。"))?;
 
     let width = compiled.inputs.total_bits();

@@ -15,6 +15,151 @@ fn cli(args: &[&str]) -> Output {
 }
 
 #[test]
+fn project_sources_are_relative_to_the_settings_file() {
+    let project = "examples/project/circuitgame2.toml";
+    let trace = cli(&["run", "--project", project, "--input", "0", "--input", "1"]);
+    assert!(
+        trace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trace.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(trace.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["0 0", "1 1", "2 0"]
+    );
+
+    let checked = cli(&["check", "--project", project]);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(checked.stdout).unwrap().trim(),
+        "検査成功（2 ファイル）"
+    );
+
+    let evaluated = cli(&[
+        "eval",
+        "--func",
+        "::demo::invert",
+        "--input",
+        "0",
+        "--project",
+        project,
+    ]);
+    assert!(
+        evaluated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    assert_eq!(String::from_utf8(evaluated.stdout).unwrap().trim(), "1");
+}
+
+#[test]
+fn project_settings_errors_have_utf8_byte_ranges() {
+    struct SettingsFile(PathBuf);
+
+    impl Drop for SettingsFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    let path = std::env::temp_dir().join(format!("ncg2-cli-project-{}.toml", std::process::id()));
+    let file = SettingsFile(path);
+    let path = file.0.to_str().unwrap();
+    let source = "# 日本語のコメント\nsources = [\"../escape.ncg2\"]\n";
+    fs::write(&file.0, source).unwrap();
+    let rejection = cli(&["run", "--project", path]);
+    assert_eq!(rejection.status.code(), Some(1));
+    assert!(rejection.stdout.is_empty());
+    let start = source.find("\"../escape.ncg2\"").unwrap();
+    let end = start + "\"../escape.ncg2\"".len();
+    let error = String::from_utf8(rejection.stderr).unwrap();
+    assert!(
+        error.contains(&format!("{path}[{start}..{end}]")),
+        "{error}"
+    );
+
+    fs::write(&file.0, b"sources = []\n# \xff").unwrap();
+    let encoding = cli(&["run", "--project", path]);
+    assert_eq!(encoding.status.code(), Some(1));
+    assert!(encoding.stdout.is_empty());
+    let error = String::from_utf8(encoding.stderr).unwrap();
+    assert!(error.contains(&format!("{path}[15..16]")), "{error}");
+    assert!(error.contains("不正な UTF-8"), "{error}");
+
+    for (source, expected) in [
+        ("sources = [\"main.ncg2\"]\nunknown = true\n", "unknown"),
+        (
+            "sources = [\"main.ncg2\"]\ntick-ns = {\n numerator = 1, denominator = 1\n}\n",
+            "設定を解釈できない",
+        ),
+        (
+            "sources = [\"main.ncg2\"]\n[[vram]]\nname = \"screen\"\nread-output = \"fb\"\n",
+            "VRAM の公開に未対応",
+        ),
+        (
+            "sources = [\"main.ncg2\"]\n[[device]]\nname = \"uart\"\nkind = \"uart-terminal\"\nbindings = {}\n",
+            "外部デバイスの接続に未対応",
+        ),
+    ] {
+        fs::write(&file.0, source).unwrap();
+        let result = cli(&["run", "--project", path]);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stdout.is_empty());
+        let error = String::from_utf8(result.stderr).unwrap();
+        assert!(error.contains(&format!("{path}[")), "{error}");
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn project_source_diagnostics_show_the_settings_location() {
+    struct ProjectFixture(PathBuf);
+
+    impl Drop for ProjectFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(self.0.join("local.ncg2"));
+            let _ = fs::remove_file(self.0.join("circuitgame2.toml"));
+            let _ = fs::remove_dir(&self.0);
+        }
+    }
+
+    let directory =
+        std::env::temp_dir().join(format!("ncg2-cli-project-source-{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    let fixture = ProjectFixture(directory);
+    let settings = fixture.0.join("circuitgame2.toml");
+    fs::write(&settings, "sources = [\"local.ncg2\"]\n").unwrap();
+    fs::write(fixture.0.join("local.ncg2"), "(using nor))").unwrap();
+    let result = cli(&["check", "--project", settings.to_str().unwrap()]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    let error = String::from_utf8(result.stderr).unwrap();
+    assert!(error.contains(settings.to_str().unwrap()), "{error}");
+    assert!(error.contains("local.ncg2 [11..12]"), "{error}");
+}
+
+#[test]
+fn project_argument_conflicts_take_precedence_over_file_errors() {
+    let path = "missing-settings.toml";
+    for extra in [&["--entry", "::main"][..], &["missing.ncg2"][..]] {
+        let mut args = vec!["run", "--project", path];
+        args.extend(extra);
+        let result = cli(&args);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stdout.is_empty());
+        let error = String::from_utf8(result.stderr).unwrap();
+        assert!(error.contains("併用できない"), "{error}");
+    }
+}
+
+#[test]
 fn readme_nor_example_runs() {
     let checked = cli(&["check", "examples/nor.ncg2", "./examples/nor.ncg2"]);
     assert!(checked.status.success());

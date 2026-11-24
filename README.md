@@ -7,7 +7,7 @@ NCG2 の回路ソースをコマンドラインで検査する。組み合わせ
 Rustup と Git を用意し、順序回路の実行に対応したブランチを取得する。[ツールチェーン](rust-toolchain.toml)は Rust 1.99.1 を指定する。
 
 ```sh
-git clone --branch stage2/clocked-run https://github.com/neknaj/circuitgame2-cli.git
+git clone --branch stage3/project-config https://github.com/neknaj/circuitgame2-cli.git
 cd circuitgame2-cli
 cargo install --path . --locked
 circuitgame2 --version
@@ -116,6 +116,24 @@ circuitgame2 run --input 11100 --input 10111 --input 10000 examples/hierarchy-ra
 ```
 
 毎 tick、左右の RAM のアドレス 1 を読む。1 tick 目は左に 1 を書く。2 tick 目は左に 0、右に 1 を書き、同じ tick の出力には更新前の値 `10` が出る。3 tick 目は読み出しだけを行い、更新後の値 `01` が出る。
+
+## 設定ファイルから実行する
+
+ソースが複数ある回路では、UTF-8 の `circuitgame2.toml` にソース一覧と開始点を書く。[プロジェクトの例題](examples/project/circuitgame2.toml)は、CLI リポジトリのルートで実行できる。
+
+```sh
+circuitgame2 run --project examples/project/circuitgame2.toml --input 0 --input 1
+```
+
+```text
+0 0
+1 1
+2 0
+```
+
+`sources` のパスは設定ファイルがあるディレクトリからの相対パスとし、区切りには `/` を使う。`entry` を省略すると `::main` を実行する。`run --project` では、ソースファイルの列挙と `--entry` は設定ファイルにまとめる。
+
+`check --project` は設定に列挙したファイルを検査する。`eval --func … --input … --project …` も同じソース集合から、`--func` で指定した関数を評価する。この開発版で実行できるのは `.ncg2` の回路である。外部デバイスの接続や VRAM の公開を指定すると、その設定を診断する。
 
 ## 自分のファイルを使う
 
