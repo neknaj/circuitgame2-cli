@@ -160,6 +160,32 @@ fn readme_latch_example_reports_reset_and_each_tick() {
 }
 
 #[test]
+fn readme_ram_example_reports_the_previous_value_at_the_selected_address() {
+    let trace = cli(&[
+        "run",
+        "--input",
+        "1101",
+        "--input",
+        "1011",
+        "--input",
+        "1000",
+        "--input",
+        "0000",
+        "examples/ram.ncg2",
+    ]);
+    assert!(
+        trace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trace.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(trace.stdout).unwrap(),
+        "0 00\n1 00\n2 10\n3 01\n4 00\n"
+    );
+    assert!(trace.stderr.is_empty());
+}
+
+#[test]
 fn run_rejects_a_bad_later_frame_before_reporting_a_trace() {
     for (frame, reason) in [("0", "2 ビット必要"), ("0x", "0 と 1")] {
         let invalid = cli(&[
