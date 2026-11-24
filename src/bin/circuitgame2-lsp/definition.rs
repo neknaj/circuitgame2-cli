@@ -36,7 +36,7 @@ struct Source<'a> {
     revision: u64,
 }
 
-/// エディタで指定された位置にある `def` の参照または `use` の宣言先を探す。
+/// 指定位置にある `def` の参照、`use`、`module-part` の対象が指す宣言を探す。
 ///
 /// 未保存の本文を優先し、選んだソースの同じ版を解析と位置変換に使う。
 ///
@@ -112,6 +112,13 @@ fn resolved_location<'p, 'a>(
             DefinitionBinding::Nor => None,
         };
     }
+    if let Some(target) = targets.resolve_module_part_at_offset(file, offset) {
+        let target = target.ok()?;
+        return Some(LocatedName {
+            source: target.module_source,
+            span: target.module.name.span.clone(),
+        });
+    }
     targets.alias_location(current, offset)
 }
 
@@ -155,6 +162,40 @@ mod tests {
         );
         assert_eq!(query(3, call + "invert".len()), None);
         assert_eq!(query(2, bad.find("missing").unwrap()), None);
+    }
+
+    #[test]
+    fn module_part_jumps_to_its_module_in_the_same_namespace() {
+        let uri = "untitled:parts.ncg2".parse().unwrap();
+        let text = "(using nor)\n\
+                    (namespace other (module owner (in x) (out y) (def y x)))\n\
+                    (namespace local (module owner (in x) (out y)))\n\
+                    (namespace local (module-part owner (def y x)))\n\
+                    (namespace local (module-part missing (def y x)))\n";
+        let current = OpenDocument {
+            uri: &uri,
+            text: Some(text),
+            version: 1,
+        };
+        let query = |line, column| {
+            locate(
+                current,
+                TextPosition { line, column },
+                PositionEncoding::Utf16,
+                std::iter::once(current),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            query(3, 30),
+            Some(Location::new(
+                uri.clone(),
+                Range::new(Position::new(2, 25), Position::new(2, 30)),
+            )),
+        );
+        assert_eq!(query(3, 35), None);
+        assert_eq!(query(4, 30), None);
     }
 }
 
