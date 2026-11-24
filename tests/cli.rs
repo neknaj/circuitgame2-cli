@@ -371,3 +371,54 @@ fn run_reports_the_selected_operands_in_a_cycle_across_module_parts() {
     );
     assert!(stderr.contains("循環内の参照"), "{stderr}");
 }
+
+#[test]
+fn readme_concat_example_places_operands_from_low_bits() {
+    let trace = cli(&["run", "--input", "010", "examples/concat.ncg2"]);
+    assert!(
+        trace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trace.stderr)
+    );
+    assert_eq!(String::from_utf8(trace.stdout).unwrap(), "0 0001\n1 0101\n");
+    assert!(trace.stderr.is_empty());
+}
+
+#[test]
+fn run_reports_operands_in_a_concat_and_selection_cycle() {
+    let owner = "tests/fixtures/clocked.ncg2";
+    let part = "tests/fixtures/cycle-part.ncg2";
+    let failure = cli(&["run", "--entry", "::tests::concat-cycle", owner, part]);
+    assert_eq!(failure.status.code(), Some(1));
+    assert!(failure.stdout.is_empty());
+
+    let stderr = String::from_utf8(failure.stderr).unwrap();
+    assert!(stderr.contains("配線参照だけで循環している"), "{stderr}");
+    assert!(
+        stderr.contains(&fixture_location(owner, "(concat 0 y)", "y")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&fixture_location(part, "(bit x 1)", "x")),
+        "{stderr}"
+    );
+    assert!(stderr.contains("循環内の参照"), "{stderr}");
+}
+
+#[test]
+fn run_reports_concat_width_and_source_range() {
+    let path = "tests/fixtures/clocked.ncg2";
+    let failure = cli(&["run", "--entry", "::tests::concat-width", path]);
+    assert_eq!(failure.status.code(), Some(1));
+    assert!(failure.stdout.is_empty());
+    let stderr = String::from_utf8(failure.stderr).unwrap();
+    let expression = "(concat a b)";
+    assert!(
+        stderr.contains(&fixture_location(path, expression, expression)),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("連接の幅 65537 ビットが上限 65536 ビットを超える"),
+        "{stderr}"
+    );
+}

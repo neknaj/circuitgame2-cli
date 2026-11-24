@@ -3,11 +3,12 @@
 use circuitgame2_core::{
     netlist::{ClockedStorageError, ClockedVmError, StateAllocationError},
     project::{
-        BitSelectionError, CallInputReason, CircuitProject, ClockedArgumentWiringError,
-        ClockedDefinitionLayoutError, ClockedDriverBitsError, ClockedEndpointError,
-        ClockedModuleOutputsError, ClockedModuleVmError, ClockedStorageLayoutError,
-        ModuleAliasTypesError, ModuleBodyPosition, ModuleCallInputsError, ModuleCallPortsError,
-        ModuleCallsError, ModuleDriverError, ModuleOutputTypesError, ModuleRootTypesError,
+        BitSelectionError, CallInputReason, CircuitLiteralWidthError, CircuitProject,
+        ClockedArgumentWiringError, ClockedDefinitionLayoutError, ClockedDriverBitsError,
+        ClockedEndpointError, ClockedModuleOutputsError, ClockedModuleVmError,
+        ClockedStorageLayoutError, ConcatResultWidthError, ConcatWidthError, ModuleAliasTypesError,
+        ModuleBodyPosition, ModuleCallInputsError, ModuleCallPortsError, ModuleCallsError,
+        ModuleConcatsError, ModuleDriverError, ModuleOutputTypesError, ModuleRootTypesError,
         ModuleSelectionsError, ModuleWiringError, OutputDriver, ResolvedPortType,
         SelectionArgumentError,
     },
@@ -65,12 +66,12 @@ pub(crate) fn error(
             ClockedEndpointError::Allocation => format!("{site} 配線の配置表を確保できない。"),
             ClockedEndpointError::Layout => format!("{site} 定義のビット配置が一致しない。"),
             ClockedEndpointError::Unsupported(at) => format!(
-                "{} 定義の右辺には信号名、ビット選択、または基底 NOR・ラッチ・RAM の直接呼び出しを指定する。",
+                "{} 定義の右辺には信号名、ビット選択、信号名やビットリテラルの連接、または基底 NOR・ラッチ・RAM の直接呼び出しを指定する。",
                 located(&at),
             ),
             ClockedEndpointError::AliasBits { reference, reason } => {
                 format!(
-                    "{} 参照した信号を配線できない。{}",
+                    "{} 右辺の配線を確定できない。{}",
                     located(&reference),
                     driver_bits_error(reason)
                 )
@@ -205,7 +206,7 @@ fn calls(site: &str, error: ModuleCallsError<'_, '_>) -> String {
             }
             match reason {
                 CallInputReason::LiteralWidth(error) => {
-                    message.push_str(&format!("\n  定数の幅に違反がある ({error:?})。"));
+                    message.push_str(&format!("\n  {}", literal_width_error(error)));
                 }
                 CallInputReason::StructRequired => message.push_str("\n  構造体の値を指定する。"),
                 CallInputReason::SignalType(actual) => message.push_str(&format!(
@@ -235,6 +236,7 @@ fn calls(site: &str, error: ModuleCallsError<'_, '_>) -> String {
 
 fn module_expression(site: &str, error: ModuleSelectionsError<'_, '_>) -> String {
     match error {
+        ModuleSelectionsError::Concat(error) => concat_error(site, error),
         ModuleSelectionsError::Types(ModuleAliasTypesError::Cycle(steps)) => {
             alias_cycle(site, steps.iter().map(|step| located(&step.reference)))
         }
@@ -272,6 +274,83 @@ fn module_expression(site: &str, error: ModuleSelectionsError<'_, '_>) -> String
             ModuleRootTypesError::Call(error),
         )) => call_ports(site, error),
         _ => format!("{site} モジュールの型または結線に違反がある。"),
+    }
+}
+
+fn concat_error(site: &str, error: ModuleConcatsError<'_, '_>) -> String {
+    match error {
+        ModuleConcatsError::Types(error) => {
+            module_expression(site, ModuleSelectionsError::Types(error))
+        }
+        ModuleConcatsError::Outputs {
+            expression,
+            left,
+            targets,
+        } => format!(
+            "{} 連接の出力は一つだが、左辺に {targets} 個の名前がある。\n  定義の左辺 {}",
+            located(&expression),
+            located(&left),
+        ),
+        ModuleConcatsError::InputType { argument, actual } => format!(
+            "{} 連接にはビット列が必要だが、引数の型は {}。\n  型が決まった箇所 {}",
+            located(&argument),
+            port_type(actual.ty),
+            located(&actual.origin),
+        ),
+        ModuleConcatsError::Literal { literal, error } => {
+            format!("{} {}", located(&literal), literal_width_error(error),)
+        }
+        ModuleConcatsError::Width { concat, reason } => {
+            let detail = match reason {
+                ConcatResultWidthError::Arguments(ConcatWidthError::Empty) => {
+                    "連接には引数を一つ以上指定する。".to_owned()
+                }
+                ConcatResultWidthError::Arguments(ConcatWidthError::ZeroWidth { argument }) => {
+                    format!(
+                        "引数 {argument} の幅は 1 ビット以上にする。引数の添字は 0 から数える。"
+                    )
+                }
+                ConcatResultWidthError::Arguments(ConcatWidthError::LimitExceeded {
+                    argument,
+                    width,
+                    limit,
+                }) => {
+                    format!(
+                        "引数 {argument} までの合計幅 {width} ビットが上限 {limit} ビットを超える。引数の添字は 0 から数える。"
+                    )
+                }
+                ConcatResultWidthError::Mismatch { expected, actual } => {
+                    format!(
+                        "連接の幅は {actual} ビットだが、要求される幅は {expected} ビットである。"
+                    )
+                }
+                ConcatResultWidthError::ConfiguredLimit { limit, actual } => {
+                    format!("連接の幅 {actual} ビットが上限 {limit} ビットを超える。")
+                }
+            };
+            format!("{} {detail}", located(&concat))
+        }
+    }
+}
+
+/// 連接と実引数で共通のリテラル幅診断を表示する。
+fn literal_width_error(error: CircuitLiteralWidthError) -> String {
+    match error {
+        CircuitLiteralWidthError::InvalidLiteral => {
+            "ビットリテラルには 0、1、二進表記、十六進表記を使う。".into()
+        }
+        CircuitLiteralWidthError::ZeroWidth => "ビットリテラルの幅は 1 ビット以上にする。".into(),
+        CircuitLiteralWidthError::FixedBitWidth { expected } => {
+            format!("0 と 1 の幅は 1 ビットである。ここで要求される幅は {expected} ビット。")
+        }
+        CircuitLiteralWidthError::DoesNotFit { expected, required } => {
+            format!(
+                "定数を表すのに {required} ビット必要で、要求幅 {expected} ビットに収まらない。"
+            )
+        }
+        CircuitLiteralWidthError::LimitExceeded { width, limit } => {
+            format!("ビットリテラルの幅 {width} ビットが上限 {limit} ビットを超える。")
+        }
     }
 }
 

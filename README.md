@@ -51,7 +51,7 @@ cargo run --quiet --locked -- run --input 11 --input 00 examples/latch.ncg2
 - 開始点は既定で `::main`。別のモジュールは `--entry ::lib::main` のように完全修飾名で指定する。
 - `--input` 一つが 1 tick 分の入力になる。各ポートのビット順は `eval` と同じ。入力ポートがない回路は `--input=` で 1 tick 進める。`--input` をすべて省くと reset の出力だけを表示する。
 - ソースは引数に並べる。分割したモジュールは本体と `module-part` を含むファイルをすべて渡す。入力ポートの値はコマンドから直接指定する。
-- モジュールの定義の右辺と実引数には、信号名や、信号名を起点にした `bit`・`slice` を使える。右辺には基底 NOR・ラッチ・RAM の直接呼び出し、実引数にはビットリテラルも使える。
+- モジュールの定義の右辺と実引数には、信号名や、信号名を起点にした `bit`・`slice` を使える。右辺には信号名やビットリテラルをつなぐ `concat` や、基底 NOR・ラッチ・RAM の直接呼び出しも書ける。実引数にはビットリテラルも使える。
 - 型のビット幅、配線のビット数、NOR ゲート数には `eval` と同じ上限を適用する。ラッチと RAM の状態領域は合計 1,048,576 ビットが上限。RAM の容量には読み出し出力も含む。
 
 [モジュールの tick と状態素子の仕様](https://neknaj.github.io/circuitgame2/docs/simulation.html)
@@ -71,6 +71,21 @@ cargo run --quiet --locked -- run --input 0110 --input 1000 examples/selected-la
 1 01
 2 01
 ```
+
+### ビット列を下位からつなぐ
+
+[連接の例題](examples/concat.ncg2)の `(concat low word 1)` は 1 ビットの入力 `low`、2 ビットの入力 `word`、定数 `1` を下位から順に並べる。
+
+```sh
+cargo run --quiet --locked -- run --input 010 examples/concat.ncg2
+```
+
+```text
+0 0001
+1 0101
+```
+
+reset 直後は入力がすべて 0 で、定数 1 は出力の最後に現れる。1 tick 目は `low` に 0、`word` に低位から `10` を入力し、その tick の出力に `0101` を得る。
 
 ## Wasmtime で実行する
 
