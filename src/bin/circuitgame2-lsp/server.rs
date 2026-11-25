@@ -80,10 +80,21 @@ impl DocumentAnalysis {
                     MetaFileRecovery::Complete(items) => {
                         (symbols::FunctionalOutline::Complete(items), Vec::new())
                     }
-                    MetaFileRecovery::Incomplete { first, lists, .. } => (
-                        symbols::FunctionalOutline::Fragments(lists),
-                        diagnostic::render_meta_error(uri, &text, encoding, first),
-                    ),
+                    MetaFileRecovery::Incomplete {
+                        first,
+                        syntax,
+                        lists,
+                    } => {
+                        let diagnostics = diagnostic::render_meta_recovery(
+                            uri,
+                            &text,
+                            encoding,
+                            &first,
+                            &syntax.repairs,
+                            &lists,
+                        );
+                        (symbols::FunctionalOutline::Fragments(lists), diagnostics)
+                    }
                 };
                 (Self::Functional { text, outline }, diagnostics)
             }

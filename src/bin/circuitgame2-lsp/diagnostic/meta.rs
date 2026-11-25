@@ -1,36 +1,62 @@
-//! NCG2M の厳格索引が報告する最初の違反を LSP 診断に変換する。
+//! NCG2M の構文回復と元入力の違反を LSP 診断に変換する。
 
 use circuitgame2_core::{
     editor::PositionEncoding,
     ncg2m::{
         defn::{DefnHeaderError, DefnPart},
-        file::{MacroPart, MetaFileError},
+        file::{MacroPart, MetaFileError, recovery::OriginalMetaList},
     },
+    syntax::Repair,
 };
 use lsp_types::{Diagnostic, Uri};
 
-use super::{Report, header, render, syntax};
+use super::{Report, header, render, repair, syntax};
 
-/// 厳格索引が返したエラーの主範囲と関連範囲を、文書内の LSP 位置に変換する。
-pub(in super::super) fn render_meta_error(
+/// 共通 S 式の修復と、元の括弧で閉じた断片の構文違反を文書位置順に返す。
+///
+/// S 式の修復がない場合は、断片に含まれない違反も落とさないよう全文の最初の違反を含める。
+pub(in super::super) fn render_meta_recovery(
     uri: &Uri,
     source: &str,
     encoding: PositionEncoding,
-    error: MetaFileError,
+    first: &MetaFileError,
+    repairs: &[Repair],
+    lists: &[OriginalMetaList],
 ) -> Vec<Diagnostic> {
-    render(uri, source, vec![meta(error)], encoding, "NCG2M")
+    let first = repairs.is_empty().then(|| meta(first));
+    let mut reports: Vec<_> = repairs.iter().map(repair).collect();
+    for list in lists {
+        let Err(error) = &list.index else {
+            continue;
+        };
+        let mut report = meta(error);
+        let base = list.span.start;
+        report.span = base + report.span.start..base + report.span.end;
+        if let Some((span, _)) = &mut report.related {
+            *span = base + span.start..base + span.end;
+        }
+        if first.as_ref().is_some_and(|first| {
+            (first.code, &first.span, &first.related)
+                == (report.code, &report.span, &report.related)
+        }) {
+            continue;
+        }
+        reports.push(report);
+    }
+    reports.extend(first);
+    render(uri, source, reports, encoding, "NCG2M")
 }
 
-fn meta(error: MetaFileError) -> Report {
+fn meta(error: &MetaFileError) -> Report {
     match error {
-        MetaFileError::Syntax(error) => syntax(error.kind, error.span),
+        MetaFileError::Syntax(error) => syntax(error.kind, error.span.clone()),
         MetaFileError::ExpectedItem(span) => Report {
-            span,
+            span: span.clone(),
             code: "ExpectedMetaItem",
             message: "この位置に NCG2M の宣言または指示を書く。".into(),
             related: None,
         },
-        MetaFileError::Directive { span, kind } => header(kind, span),
+        MetaFileError::Directive { span, kind } => header(*kind, span.clone()),
         MetaFileError::Defn(error) => defn_header(error),
         MetaFileError::Defmacro { span, part } => {
             let message = match part {
@@ -40,7 +66,7 @@ fn meta(error: MetaFileError) -> Report {
                 MacroPart::ParameterName => "マクロの仮引数名に無修飾名を指定する。",
             };
             Report {
-                span,
+                span: span.clone(),
                 code: "InvalidDefmacroHeader",
                 message: message.into(),
                 related: None,
@@ -49,11 +75,11 @@ fn meta(error: MetaFileError) -> Report {
     }
 }
 
-fn defn_header(error: DefnHeaderError) -> Report {
+fn defn_header(error: &DefnHeaderError) -> Report {
     let (span, code, message, related) = match error {
-        DefnHeaderError::Syntax(error) => return syntax(error.kind, error.span),
+        DefnHeaderError::Syntax(error) => return syntax(error.kind, error.span.clone()),
         DefnHeaderError::ExpectedOneDeclaration(span) => (
-            span,
+            span.clone(),
             "ExpectedOneDefn",
             "補助関数の宣言を一つ指定する。",
             None,
@@ -70,22 +96,22 @@ fn defn_header(error: DefnHeaderError) -> Report {
                 DefnPart::ParameterName => "仮引数名に無修飾名を指定する。",
                 DefnPart::DataType => "データ型名または `(List T)` の形式が必要。",
             };
-            (span, "InvalidDefnHeader", message, None)
+            (span.clone(), "InvalidDefnHeader", message, None)
         }
         DefnHeaderError::DuplicateParameter { duplicate, first } => (
-            duplicate,
+            duplicate.clone(),
             "DuplicateDefnParameter",
             "同じ仮引数名が複数ある。",
-            Some((first, "最初の仮引数")),
+            Some((first.clone(), "最初の仮引数")),
         ),
         DefnHeaderError::ParameterCount {
             arguments,
             parameters,
         } => (
-            parameters,
+            parameters.clone(),
             "DefnParameterCount",
             "仮引数の個数が署名の引数型の個数と一致しない。",
-            Some((arguments, "署名の引数型")),
+            Some((arguments.clone(), "署名の引数型")),
         ),
     };
     Report {
