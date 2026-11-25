@@ -86,6 +86,195 @@ fn stdio_uses_utf16_positions_from_the_latest_document() {
 }
 
 #[test]
+fn document_symbols_hover_and_semantic_tokens_cover_the_same_circuit() {
+    let uri = "untitled:navigation.ncg2";
+    let source = "(using nor)\n\
+        (namespace logic\n\
+          (func invert (in input) (out result) (def result (nor input input)))\n\
+          (module gate (in x) (out y) (def wire (invert x)) (def y wire)))\n";
+    let lines: Vec<_> = source.lines().collect();
+    let document = json!({"textDocument": {"uri": uri}});
+    let hover_at = |id, line: usize, word| {
+        let character = lines[line].find(word).unwrap();
+        request(
+            id,
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": uri}, "position": {"line": line, "character": character}
+            }),
+        )
+    };
+    let responses = exchange([
+        request(
+            1,
+            "initialize",
+            json!({
+                "initializationOptions": {"ncg2SemanticTokens": true},
+            "capabilities": {"textDocument": {
+                "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
+                "semanticTokens": {"requests": {"full": true}, "tokenTypes": ["struct"], "tokenModifiers": ["declaration"], "formats": ["relative"]}
+            }}
+            }),
+        ),
+        notification("initialized", json!({})),
+        notification(
+            "textDocument/didOpen",
+            json!({"textDocument": {
+                "uri": uri, "languageId": "ncg2", "version": 1, "text": source
+            }}),
+        ),
+        request(2, "textDocument/documentSymbol", document.clone()),
+        hover_at(3, 3, "invert"),
+        hover_at(4, 3, "wire"),
+        request(5, "textDocument/semanticTokens/full", document.clone()),
+        notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": format!(")\n{source}")}]
+            }),
+        ),
+        request(6, "textDocument/documentSymbol", document),
+        request(7, "shutdown", Value::Null),
+        notification("exit", Value::Null),
+    ]);
+    let result = |id| {
+        &responses
+            .iter()
+            .find(|response| response["id"] == id)
+            .unwrap()["result"]
+    };
+    let capabilities = &result(1)["capabilities"];
+    assert_eq!(capabilities["hoverProvider"], true);
+    assert_eq!(capabilities["documentSymbolProvider"], true);
+    let legend = capabilities["semanticTokensProvider"]["legend"]["tokenTypes"]
+        .as_array()
+        .unwrap();
+    assert_eq!(result(2)[0]["name"], "logic");
+    assert_eq!(result(2)[0]["children"][0]["name"], "invert");
+    assert_eq!(result(2)[0]["children"][1]["name"], "gate");
+    assert_eq!(
+        result(3)["contents"]["value"],
+        "func ::logic::invert\n(in input)\n(out result)"
+    );
+    assert_eq!(result(4)["contents"]["value"], "内部信号 wire\n(bits 1)");
+
+    let tokens = result(5)["data"].as_array().unwrap();
+    let mut line = 0;
+    let mut column = 0;
+    let mut names = Vec::new();
+    for token in tokens.chunks_exact(5) {
+        let number = |position: usize| token[position].as_u64().unwrap() as usize;
+        if number(0) != 0 {
+            line += number(0);
+            column = 0;
+        }
+        column += number(1);
+        names.push((
+            &lines[line][column..column + number(2)],
+            legend[number(3)].as_str().unwrap(),
+            number(4),
+        ));
+    }
+    for expected in [
+        ("logic", "ncg2Namespace", 1),
+        ("invert", "ncg2Function", 1),
+        ("invert", "ncg2Function", 0),
+        ("gate", "ncg2Module", 1),
+        ("wire", "ncg2Signal", 1),
+        ("wire", "ncg2Signal", 0),
+        ("x", "ncg2Port", 1),
+        ("x", "ncg2Port", 0),
+    ] {
+        assert!(
+            names.contains(&expected),
+            "{expected:?} is missing from {names:?}"
+        );
+    }
+    assert!(
+        result(6)
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| { item["name"] == "gate" && item["containerName"] == "logic" })
+    );
+}
+
+#[test]
+fn semantic_legend_respects_standard_clients() {
+    let responses = exchange([
+        request(
+            1,
+            "initialize",
+            json!({"capabilities": {"textDocument": {
+                "semanticTokens": {
+                    "requests": {"full": true},
+                    "tokenTypes": ["namespace", "function", "class", "variable", "parameter"],
+                    "tokenModifiers": [],
+                    "formats": ["relative"]
+                }
+            }}}),
+        ),
+        notification("initialized", json!({})),
+        request(2, "shutdown", Value::Null),
+        notification("exit", Value::Null),
+    ]);
+    assert_eq!(
+        responses[0]["result"]["capabilities"]["semanticTokensProvider"]["legend"],
+        json!({
+            "tokenTypes": ["namespace", "function", "class", "variable", "parameter"],
+            "tokenModifiers": [],
+        }),
+    );
+}
+#[test]
+fn recovered_outline_and_tokens_use_the_negotiated_columns() {
+    let uri = "untitled:recovered-symbols.ncg2";
+    let source = "\"漢😀\" (func flip (in x) (out y) (def y (nor x x)))";
+    let prefix = &source[..source.find("flip").unwrap()];
+    for (encoding, column) in [
+        ("utf-8", prefix.len()),
+        ("utf-16", prefix.encode_utf16().count()),
+        ("utf-32", prefix.chars().count()),
+    ] {
+        let document = json!({"textDocument": {"uri": uri}});
+        let responses = exchange([
+            request(
+                1,
+                "initialize",
+                json!({"capabilities": {
+                    "general": {"positionEncodings": [encoding]},
+                    "textDocument": {
+                        "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
+                        "semanticTokens": {
+                            "requests": {"full": true}, "tokenTypes": ["function"],
+                            "tokenModifiers": [], "formats": ["relative"]
+                        }
+                    }
+                }}),
+            ),
+            notification("initialized", json!({})),
+            notification(
+                "textDocument/didOpen",
+                json!({"textDocument": {
+                    "uri": uri, "languageId": "ncg2", "version": 1, "text": source
+                }}),
+            ),
+            request(2, "textDocument/documentSymbol", document.clone()),
+            request(3, "textDocument/semanticTokens/full", document),
+            request(4, "shutdown", Value::Null),
+            notification("exit", Value::Null),
+        ]);
+        let result = |id| &responses.iter().find(|item| item["id"] == id).unwrap()["result"];
+        assert_eq!(result(2)[0]["name"], "flip");
+        assert_eq!(
+            result(2)[0]["location"]["range"]["start"]["character"],
+            column
+        );
+        assert_eq!(result(3)["data"], json!([0, column, 4, 0, 0]));
+    }
+}
+
+#[test]
 fn name_diagnostics_follow_the_configured_dependency_snapshot() {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/project");
     let basis = Url::from_file_path(project.join("basis.ncg2")).unwrap();
