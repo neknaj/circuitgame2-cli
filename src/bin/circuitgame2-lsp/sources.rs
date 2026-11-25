@@ -361,12 +361,16 @@ fn from_file(project_source: &ProjectSource<'_>, id: &str) -> bool {
     project_source.id.same_file(&id)
 }
 
+// ディスクから読んだ版を 0 とし、LSP の符号付き文書バージョンの順序を保つ。
+pub(super) fn core_revision(version: i32) -> u64 {
+    (i64::from(version) - i64::from(i32::MIN) + 1) as u64
+}
+
 fn opened<'a>(id: String, doc: &OpenDocument<'a>) -> Result<Source<'a>, String> {
     let text = doc
         .text
         .ok_or_else(|| format!("{} の最新版の本文を取得できない。", doc.uri.as_str()))?;
-    // ディスクから読んだ版は 0。LSP は負の版番号も使えるため、符号付きの順序を保ってずらす。
-    let revision = (i64::from(doc.version) - i64::from(i32::MIN) + 1) as u64;
+    let revision = core_revision(doc.version);
     Ok(Source {
         id,
         uri: doc.uri.clone(),
