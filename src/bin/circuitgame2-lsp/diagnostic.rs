@@ -114,16 +114,14 @@ fn render(
 
 /// 同じソース集合の構文、宣言、別名を確定できたときに参照診断を返す。
 pub(super) fn collect_references(
+    project: &circuitgame2_core::project::CircuitProject<'_>,
     sources: &SourceSet<'_>,
     encoding: PositionEncoding,
 ) -> Vec<(Uri, Diagnostic)> {
-    let Ok(project) = sources.parse_strict() else {
-        return Vec::new();
-    };
-    if validate_circuit_basis(&project).is_err() {
+    if validate_circuit_basis(project).is_err() {
         return Vec::new();
     }
-    let Ok(targets) = index_use_targets(&project) else {
+    let Ok(targets) = index_use_targets(project) else {
         return Vec::new();
     };
     let Ok(scope) = check_use_aliases(&targets) else {

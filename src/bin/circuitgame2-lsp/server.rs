@@ -25,7 +25,9 @@ use super::{
     completion, definition,
     diagnostic::{self, LocalRecovery},
     inlay_hint, navigation,
-    sources::{self, OpenDocument, ProjectKey, STANDALONE_ID, SourcePaths, SourceSet},
+    sources::{
+        self, DiskSyntaxCache, OpenDocument, ProjectKey, STANDALONE_ID, SourcePaths, SourceSet,
+    },
     symbols,
 };
 
@@ -84,6 +86,7 @@ struct Server {
     hierarchical_symbols: bool,
     semantic_palette: Option<navigation::SemanticPalette>,
     hint_dependencies: HashMap<Uri, Vec<Uri>>,
+    disk_syntax: DiskSyntaxCache,
     next_refresh_id: u64,
 }
 
@@ -534,8 +537,10 @@ impl Server {
                     if selection.is_ok()
                         && diagnostics.is_empty()
                         && let Ok(snapshot) = SourceSet::single(current)
+                        && let Ok(project) = snapshot.parse_strict()
                     {
-                        let references = diagnostic::collect_references(&snapshot, encoding);
+                        let references =
+                            diagnostic::collect_references(&project, &snapshot, encoding);
                         if snapshot.still_current([(uri, STANDALONE_ID)]) {
                             diagnostics.extend(references.into_iter().map(|(_, item)| item));
                         }
@@ -554,10 +559,14 @@ impl Server {
                 .map(|(_, doc)| (doc.uri.clone(), self.documents[doc.uri].syntax.clone()))
                 .collect();
             // 次のプロジェクトの解析を始める前に、照合した診断を送る。
-            if let Ok(snapshot) = SourceSet::load_group(project, paths, &documents, open) {
-                let references = diagnostic::collect_references(&snapshot, encoding);
+            if let Ok(snapshot) = SourceSet::load_group(project, paths, &documents, open)
+                && let Ok(project) = snapshot.parse_strict_with_disk_cache(Some(&self.disk_syntax))
+            {
+                let references = diagnostic::collect_references(&project, &snapshot, encoding);
+                let staged = snapshot.stage_disk_indexes(&self.disk_syntax);
                 let members = documents.iter().map(|(id, doc)| (doc.uri, id.as_str()));
                 if snapshot.still_current(members) {
+                    self.disk_syntax.extend(staged);
                     for (uri, item) in references {
                         if let Some(diagnostics) = reports.get_mut(&uri) {
                             diagnostics.push(item);
