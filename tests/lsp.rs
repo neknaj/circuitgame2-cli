@@ -12,6 +12,167 @@ use serde_json::{Value, json};
 use url::Url;
 
 #[test]
+fn stdio_checks_ncg2m_after_sequential_edits_and_a_full_replacement() {
+    let uri = "untitled:editing.ncg2m";
+    let initial = concat!(
+        "(defn quoted (as-type (Fn () Syntax) (fn () \"🦊\"))) ",
+        "(defn choose (as-type (Fn (Bool Bool) Bool) (fn (left right) left)))",
+    );
+    let utf16_column = |text: &str, byte| text[..byte].encode_utf16().count();
+    let replace = |text: &str, needle: &str, value: &str| {
+        let start = text.find(needle).unwrap();
+        json!({
+            "range": {
+                "start": {"line": 0, "character": utf16_column(text, start)},
+                "end": {"line": 0, "character": utf16_column(text, start + needle.len())}
+            },
+            "text": value
+        })
+    };
+    let change = |version, edits| {
+        notification(
+            "textDocument/didChange",
+            json!({"textDocument": {"uri": uri, "version": version}, "contentChanges": edits}),
+        )
+    };
+    let after_emoji = initial.replacen('🦊', "猫", 1);
+    let after_both = after_emoji.replacen("right", "left", 1);
+    let messages = [
+        request(1, "initialize", json!({"capabilities": {}})),
+        notification("initialized", json!({})),
+        notification(
+            "textDocument/didOpen",
+            json!({"textDocument": {
+                "uri": uri, "languageId": "ncg2m", "version": 1, "text": initial
+            }}),
+        ),
+        change(
+            3,
+            json!([
+                replace(initial, "🦊", "猫"),
+                replace(&after_emoji, "right", "left")
+            ]),
+        ),
+        change(2, json!([{"text": ")"}])),
+        change(
+            4,
+            json!([{
+                "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 0}},
+                "text": ")"
+            }]),
+        ),
+        change(5, json!([replace(initial, "right", "value")])),
+        change(6, json!([{"text": ")"}])),
+        change(7, json!([{"text": initial}])),
+        request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ),
+        notification(
+            "textDocument/didClose",
+            json!({"textDocument": {"uri": uri}}),
+        ),
+        request(3, "shutdown", Value::Null),
+        notification("exit", Value::Null),
+    ];
+    let responses = exchange(messages);
+    let published: Vec<_> = responses
+        .iter()
+        .filter(|message| message["method"] == "textDocument/publishDiagnostics")
+        .map(|message| &message["params"])
+        .collect();
+    let versions: Vec<_> = published
+        .iter()
+        .map(|publication| publication["version"].as_i64())
+        .collect();
+    assert_eq!(
+        versions,
+        [Some(1), Some(3), Some(4), Some(5), Some(6), Some(7), None]
+    );
+    assert!(
+        published
+            .iter()
+            .all(|publication| publication["uri"] == uri)
+    );
+    let reports = |index: usize| published[index]["diagnostics"].as_array().unwrap();
+    for index in [0, 2, 3, 5, 6] {
+        assert!(reports(index).is_empty(), "{published:?}");
+    }
+    assert_eq!(reports(1).len(), 1);
+    let diagnostic = &reports(1)[0];
+    assert_eq!(diagnostic["source"], "NCG2M");
+    assert_eq!(diagnostic["code"], "DuplicateDefnParameter");
+    let first = after_both.find("left left").unwrap();
+    let duplicate = first + "left ".len();
+    let expected_range = |byte| {
+        json!({
+            "start": {"line": 0, "character": utf16_column(&after_both, byte)},
+            "end": {"line": 0, "character": utf16_column(&after_both, byte + "left".len())},
+        })
+    };
+    assert_eq!(diagnostic["range"], expected_range(duplicate));
+    assert_eq!(diagnostic["data"]["byteStart"], duplicate);
+    assert_eq!(diagnostic["data"]["byteEnd"], duplicate + "left".len());
+    let related = &diagnostic["relatedInformation"][0]["location"];
+    assert_eq!(related["uri"], uri);
+    assert_eq!(related["range"], expected_range(first));
+    assert_eq!(reports(4).len(), 1);
+    assert_eq!(reports(4)[0]["code"], "UnexpectedClose");
+    let symbols = responses.iter().find(|message| message["id"] == 2).unwrap();
+    assert!(symbols["result"].is_null(), "{symbols:?}");
+}
+
+#[test]
+fn stdio_checks_the_unsaved_ncg2m_text_of_a_mixed_project_file() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path();
+    let circuit = directory.join("main.ncg2");
+    let functional = directory.join("補助 関数.ncg2m");
+    let circuit_text = "(using nor)";
+    std::fs::write(
+        directory.join("circuitgame2.toml"),
+        "sources = [\"main.ncg2\", \"補助 関数.ncg2m\"]\n",
+    )
+    .unwrap();
+    std::fs::write(&circuit, circuit_text).unwrap();
+    std::fs::write(&functional, "(defn ok (as-type (Fn () Bool) (fn () true)))").unwrap();
+    let circuit_uri = Url::from_file_path(circuit).unwrap();
+    let functional_uri = Url::from_file_path(functional).unwrap();
+    let opened = |uri: &Url, language_id, text| {
+        notification(
+            "textDocument/didOpen",
+            json!({"textDocument": {
+                "uri": uri.as_str(), "languageId": language_id, "version": 1, "text": text,
+            }}),
+        )
+    };
+    let messages = [
+        request(1, "initialize", json!({"capabilities": {}})),
+        notification("initialized", json!({})),
+        opened(&circuit_uri, "ncg2", circuit_text),
+        opened(&functional_uri, "ncg2m", ")"),
+        request(2, "shutdown", Value::Null),
+        notification("exit", Value::Null),
+    ];
+    let responses = exchange(messages);
+    let published: Vec<_> = responses
+        .iter()
+        .filter(|message| message["method"] == "textDocument/publishDiagnostics")
+        .map(|message| &message["params"])
+        .collect();
+    assert_eq!(published.len(), 2, "{published:?}");
+    assert_eq!(published[0]["uri"], circuit_uri.as_str());
+    assert_eq!(published[0]["diagnostics"], json!([]));
+    assert_eq!(published[1]["uri"], functional_uri.as_str());
+    assert_eq!(published[1]["version"], 1);
+    assert_eq!(published[1]["diagnostics"][0]["source"], "NCG2M");
+    assert_eq!(published[1]["diagnostics"][0]["code"], "UnexpectedClose");
+    assert_eq!(published[1]["diagnostics"][0]["data"]["byteStart"], 0);
+    assert_eq!(published[1]["diagnostics"][0]["data"]["byteEnd"], 1);
+}
+
+#[test]
 fn stdio_uses_utf16_positions_from_the_latest_document() {
     let uri = "untitled:editing.ncg2";
     let source = "(using nor)\n(func invert (in x) (out y) (def y (nor x x)))\n\
