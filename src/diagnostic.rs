@@ -21,7 +21,7 @@ fn position(path: &str, span: &Range<usize>) -> String {
     format!("{path} [{}..{}]", span.start, span.end)
 }
 
-fn located(site: &LocatedName<'_, '_>) -> String {
+pub(super) fn located(site: &LocatedName<'_, '_>) -> String {
     position(&site.source.id.components().join("/"), &site.span)
 }
 
@@ -122,7 +122,11 @@ fn reference_error(error: DefinitionBatchError<'_, '_>) -> String {
     reference_reason(&at, error.site.name.word, error.reason)
 }
 
-fn reference_reason(at: &str, name: &str, reason: DefinitionReferenceReason<'_, '_>) -> String {
+pub(super) fn reference_reason(
+    at: &str,
+    name: &str,
+    reason: DefinitionReferenceReason<'_, '_>,
+) -> String {
     match reason {
         DefinitionReferenceReason::Missing => format!("{at} {name} が見つからない。"),
         DefinitionReferenceReason::MissingPrefix => {

@@ -776,3 +776,76 @@ fn run_reports_concat_width_and_source_range() {
         "{stderr}"
     );
 }
+
+#[test]
+fn check_validates_uart_bindings_at_their_settings_spans() {
+    let folder = std::env::temp_dir().join(format!("ncg2-cli-uart-{}", std::process::id()));
+    fs::create_dir(&folder).unwrap();
+    fs::write(
+        folder.join("main.ncg2"),
+        "(using nor) (module main (in rx) (out tx) (def tx (nor rx rx)))",
+    )
+    .unwrap();
+    let settings = folder.join("circuitgame2.toml");
+    let path = settings.to_str().unwrap();
+    let header = "sources = [\"main.ncg2\"]\ntick-ns = { numerator = 10, denominator = 1 }\n";
+    let first = "[[device]]\nname = \"端末\"\nkind = \"uart-terminal\"\n";
+    let valid = "bindings = { tx = \"tx\", rx = \"rx\" }\noptions = { baud = 115200 }\n";
+
+    fs::write(&settings, format!("{header}{first}{valid}")).unwrap();
+    let checked = cli(&["check", "--project", path]);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert!(checked.stderr.is_empty());
+
+    let wrong_direction = format!(
+        "{header}{first}bindings = {{ tx = \"rx\", rx = \"rx\" }}\noptions = {{ baud = 115200 }}\n",
+    );
+    fs::write(&settings, &wrong_direction).unwrap();
+    let offset = wrong_direction.find("tx = \"rx\"").unwrap() + "tx = ".len();
+    let failed = cli(&["check", "--project", path]);
+    assert!(!failed.status.success());
+    let message = String::from_utf8(failed.stderr).unwrap();
+    assert!(message.contains(&format!("[{offset}..{}]", offset + "\"rx\"".len())));
+    assert!(message.contains("方向が合わない"));
+    assert!(message.contains("関連箇所"));
+
+    let second = first.replace("端末", "別端末");
+    let duplicate = format!("{header}{first}{valid}{second}{valid}");
+    fs::write(&settings, &duplicate).unwrap();
+    let failed = cli(&["check", "--project", path]);
+    assert!(!failed.status.success());
+    let message = String::from_utf8(failed.stderr).unwrap();
+    assert!(message.contains("回路入力を複数の接続が駆動"));
+    for (offset, _) in duplicate.match_indices("rx = \"rx\"") {
+        let value = offset + "rx = ".len();
+        assert!(message.contains(&format!("[{value}..{}]", value + "\"rx\"".len())));
+    }
+
+    let malformed = format!("{header}{first}{}", valid.replace("115200", "0"));
+    fs::write(&settings, malformed).unwrap();
+    let failed = cli(&["check", "--project", path]);
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8(failed.stderr)
+            .unwrap()
+            .contains("baud には正の整数")
+    );
+    let coarse = format!(
+        "{}{first}{valid}",
+        header.replace("numerator = 10", "numerator = 100000")
+    );
+    fs::write(&settings, coarse).unwrap();
+    let failed = cli(&["check", "--project", path]);
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8(failed.stderr)
+            .unwrap()
+            .contains("ビット境界を区別できない")
+    );
+
+    fs::remove_dir_all(&folder).unwrap();
+}

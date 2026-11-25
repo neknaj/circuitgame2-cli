@@ -133,7 +133,7 @@ ncg2 run --project examples/project/circuitgame2.toml --input 0 --input 1
 
 `sources` のパスは設定ファイルがあるディレクトリからの相対パスとし、区切りには `/` を使う。`entry` を省略すると `::main` を実行する。`run --project` では、ソースファイルの列挙と `--entry` は設定ファイルにまとめる。
 
-`check --project` は設定に列挙したファイルを検査する。`eval --func … --input … --project …` も同じソース集合から、`--func` で指定した関数を評価する。実行できるソースは `.ncg2` の回路である。外部デバイスの接続を指定すると、その設定を診断する。
+`check --project` は設定に列挙したファイルを検査する。`eval --func … --input … --project …` も同じソース集合から、`--func` で指定した関数を評価する。実行できるソースは `.ncg2` の回路である。UART 端末を設定した場合、`ncg2 check --project` は接続先の方向と幅、重複駆動、`baud`、tick 周期を検査する。外部デバイスを接続した回路の実行は準備中。
 
 ### 設定で公開した RAM を読む
 

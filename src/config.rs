@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, fs, num::NonZeroU64, ops::Range, path::Path};
 
 use serde::Deserialize;
-use toml::{Spanned, Table};
+use toml::{Spanned, Value};
 
 /// ソース集合とモジュールの開始点を指定する実行設定。
 #[derive(Deserialize)]
@@ -13,35 +13,38 @@ pub struct ProjectConfig {
     pub sources: Spanned<Vec<Spanned<String>>>,
     /// 実行時の開始モジュールと原文範囲。
     pub entry: Option<Spanned<String>>,
-    #[serde(rename = "tick-ns")]
-    _tick_ns: Option<TickPeriod>,
+    /// 設定した tick 周期と原文範囲。
+    pub tick_ns: Option<Spanned<TickPeriod>>,
     #[serde(default)]
-    device: Vec<Spanned<Device>>,
+    /// 実行設定に並んだ外部デバイスとその位置。
+    pub device: Vec<Spanned<Device>>,
     #[serde(default)]
     /// 設定順に並んだ VRAM の公開指定。
     pub vram: Vec<Vram>,
 }
 
+/// TOML に記した正の有理数の tick 周期。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TickPeriod {
-    #[serde(rename = "numerator")]
-    _numerator: NonZeroU64,
-    #[serde(rename = "denominator")]
-    _denominator: NonZeroU64,
+pub struct TickPeriod {
+    /// ナノ秒数の分子。
+    pub numerator: NonZeroU64,
+    /// ナノ秒数の分母。
+    pub denominator: NonZeroU64,
 }
 
+/// 外部デバイスの種類、配線、種別ごとのオプション。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Device {
-    #[serde(rename = "name")]
-    _name: String,
-    #[serde(rename = "kind")]
-    _kind: String,
-    #[serde(rename = "bindings")]
-    _bindings: BTreeMap<String, String>,
-    #[serde(rename = "options")]
-    _options: Option<Table>,
+pub struct Device {
+    /// 設定内のインスタンス名と指定箇所。
+    pub name: Spanned<String>,
+    /// 登録済みデバイス種別と指定箇所。
+    pub kind: Spanned<String>,
+    /// デバイスポートから回路ポートへの接続先とその原文範囲。
+    pub bindings: Spanned<BTreeMap<String, Spanned<String>>>,
+    /// 種別ごとのオプションと各値の原文範囲。
+    pub options: Option<Spanned<BTreeMap<String, Spanned<Value>>>>,
 }
 
 /// 公開名と、RAM の読み出しに対応するルート回路の信号名。
