@@ -5,15 +5,16 @@ use std::ops::Range;
 use circuitgame2_core::{
     ncg2m::file::MetaItemKind,
     project::{
-        AliasConflict, AliasDisposition, DefinitionAnalysisError, LocatedName, MixedAbsoluteTarget,
-        MixedUseAliasConflict, ProjectSource, ProjectSourceIndex, SourceSnapshot, UseSite,
+        AliasConflict, AliasDisposition, DefinitionAnalysisError, FuncArityError, FuncCallTarget,
+        LocatedName, MixedAbsoluteTarget, MixedUseAliasConflict, MixedUseAliases,
+        ParsedProjectSources, ProjectSource, ProjectSourceIndex, SourceSnapshot, UseSite,
         check_mixed_use_aliases, index_mixed_use_targets, parse_project_sources,
         validate_mixed_circuit_basis,
     },
     syntax::circuit::Head,
 };
 
-use super::{check_report::Report, diagnostic};
+use super::{check_body, check_report::Report, diagnostic};
 
 mod errors;
 
@@ -66,7 +67,9 @@ pub(super) fn check(
         .plan_defn_calls()
         .map_err(|error| contextualize(errors::calls(&project, error, report)))?;
 
-    // 補助関数の検査だけでは、回路とマクロの本体に関する検査成功を報告できない。
+    check_circuit_calls(&project, &aliases, report).map_err(&contextualize)?;
+
+    // 結線、型、マクロ本体の検査が終わるまで、プロジェクト全体の成功は報告しない。
     for (source, index) in project.sources().iter().zip(project.indexes()) {
         match index {
             ProjectSourceIndex::Functional(items) => {
@@ -100,6 +103,75 @@ pub(super) fn check(
         }
     }
     Ok(project.sources().len())
+}
+
+/// 関数の定義をソース順に調べ、呼び出し名または入力個数の最初の違反を返す。
+fn check_circuit_calls(
+    project: &ParsedProjectSources<'_>,
+    aliases: &MixedUseAliases<'_, '_, '_>,
+    report: &mut Option<&mut Report<'_>>,
+) -> Result<(), String> {
+    for (file, index) in project.indexes().iter().enumerate() {
+        let ProjectSourceIndex::Circuit(circuit) = index else {
+            continue;
+        };
+        for (entry, (item, ranges)) in circuit
+            .syntax
+            .entries
+            .iter()
+            .zip(&circuit.entry_ranges)
+            .enumerate()
+        {
+            if item.head != Head::Func {
+                continue;
+            }
+            for (definition, row) in circuit.definitions[ranges.definitions.clone()]
+                .iter()
+                .enumerate()
+            {
+                for reference in 0..row.references.len() {
+                    let Some(result) =
+                        aliases.resolve_mixed_func_call_arity(file, entry, definition, reference)
+                    else {
+                        continue;
+                    };
+                    let call = result.map_err(|error| errors::circuit_call(error, report))?;
+                    let location = site(call.source, call.call.span.clone());
+                    match call.check_input_count() {
+                        Ok(_) => {}
+                        Err(FuncArityError::ArgumentCount {
+                            call,
+                            target,
+                            expected,
+                            actual,
+                        }) => {
+                            let declaration = match &target {
+                                FuncCallTarget::Nor => None,
+                                FuncCallTarget::Function { declaration, .. } => Some(declaration),
+                            };
+                            return Err(check_body::argument_count(
+                                &call,
+                                expected,
+                                actual,
+                                declaration,
+                                report,
+                            ));
+                        }
+                        Err(_) => {
+                            return Err(failure(
+                                report,
+                                "circuit_call_check",
+                                location,
+                                "回路関数の呼び出しを検査できない。",
+                                [],
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn alias_name<'p, 'a>(directive: &UseSite<'p, 'a>) -> LocatedName<'p, 'a> {
