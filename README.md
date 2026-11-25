@@ -216,7 +216,9 @@ wasmtime run --dir=. target/wasm32-wasip2/debug/ncg2.wasm run --input 11 --input
 
 ## エディタで診断と定義移動を使う
 
-ネイティブ環境でインストールすると、`ncg2` と `circuitgame2-lsp` が使える。エディタの LSP 設定で `circuitgame2-lsp` を標準入出力のサーバーとして起動し、`.ncg2` の言語 ID を `ncg2` に設定する。
+ネイティブ環境でインストールすると、`ncg2` と `circuitgame2-lsp` が使える。VS Code と Neovim の拡張は、`PATH` 上の `circuitgame2-lsp` を起動して `.ncg2` を解析する。 [エディタ拡張の入手と設定](https://github.com/neknaj/circuitgame2-editors#readme)
+
+手動で LSP を設定する場合は、`circuitgame2-lsp` を標準入出力のサーバーとして起動し、`.ncg2` の言語 ID を `ncg2` に設定する。
 
 開いた文書の字句、S 式、回路フォームを検査する。構文を回復できた場合は、後続のフォームの診断も表示する。
 
