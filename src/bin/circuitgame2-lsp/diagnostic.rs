@@ -27,7 +27,7 @@ use super::sources::SourceSet;
 mod local;
 mod meta;
 pub(super) use local::LocalRecovery;
-pub(super) use meta::collect_meta;
+pub(super) use meta::render_meta_error;
 
 #[derive(Clone)]
 struct Report {
