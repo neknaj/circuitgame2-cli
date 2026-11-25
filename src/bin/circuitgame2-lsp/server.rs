@@ -663,10 +663,10 @@ impl Server {
                 .collect();
             // 次のプロジェクトの解析を始める前に、照合した診断を送る。
             if let Ok(snapshot) = SourceSet::load_group(project, paths, &documents, open)
-                && let Ok(project) = snapshot.parse_strict_with_disk_cache(Some(&self.disk_syntax))
+                && let Ok((project, staged)) =
+                    snapshot.parse_strict_recording_disk_indexes(&self.disk_syntax)
             {
                 let references = diagnostic::collect_references(&project, &snapshot, encoding);
-                let staged = snapshot.stage_disk_indexes(&self.disk_syntax);
                 let members = documents.iter().map(|(id, doc)| (doc.uri, id.as_str()));
                 if snapshot.still_current(members) {
                     self.disk_syntax.extend(staged);

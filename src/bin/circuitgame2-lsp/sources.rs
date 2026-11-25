@@ -12,7 +12,8 @@ use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding},
     project::{
         CircuitProject, CircuitProjectError, LocatedName, ProjectSource, SourceSnapshot,
-        normalize_path, parse_circuit_project_with_cached_indexes,
+        normalize_path, parse_circuit_project_recording_indexes,
+        parse_circuit_project_with_cached_indexes,
     },
     syntax::circuit::CachedCircuitRecovery,
 };
@@ -267,26 +268,56 @@ impl<'a> SourceSet<'a> {
         parse_circuit_project_with_cached_indexes(&self.snapshots(), &self.syntax_candidates(disk))
     }
 
-    /// 厳格解析に成功した閉文書のうち、登録する索引を用意する。
+    /// 厳格解析しながら、閉文書の索引をキャッシュの上限まで用意する。
     ///
     /// ディスクの本文を公開直前に照合し、成功した場合にだけ登録する。
-    pub(super) fn stage_disk_indexes(&self, disk: &DiskSyntaxCache) -> DiskSyntaxCache {
+    ///
+    /// # Errors
+    ///
+    /// 構文、言語、ソース指定に違反があるとき、厳格解析の診断を返す。
+    pub(super) fn parse_strict_recording_disk_indexes(
+        &self,
+        disk: &DiskSyntaxCache,
+    ) -> Result<(CircuitProject<'_>, DiskSyntaxCache), CircuitProjectError<'_>> {
+        let candidates = self.syntax_candidates(Some(disk));
+        let mut requested = vec![false; self.sources.len()];
+        let mut count = 0;
+        let mut bytes = 0;
+        // 従来の登録順で最後まで残る新規索引だけを作る。
+        for (input, source) in self.sources.iter().enumerate().rev() {
+            let len = source.text.len();
+            if !matches!(source.origin, SourceOrigin::Disk(_))
+                || len > MAX_DISK_SOURCE_BYTES
+                || candidates[input].is_some_and(|old| old.text() == source.text)
+            {
+                continue;
+            }
+            if count == MAX_DISK_SOURCES || bytes + len > MAX_DISK_SOURCE_BYTES {
+                break;
+            }
+            requested[input] = true;
+            count += 1;
+            bytes += len;
+        }
+        if count == 0 {
+            requested.clear();
+        }
+        let (project, records) =
+            parse_circuit_project_recording_indexes(&self.snapshots(), &candidates, &requested)?;
         let mut staged = DiskSyntaxCache::default();
-        for source in &self.sources {
-            if let SourceOrigin::Disk(path) = &source.origin
-                && source.text.len() <= MAX_DISK_SOURCE_BYTES
-                && !disk
-                    .candidate(path, &source.id)
-                    .is_some_and(|old| old.text() == source.text)
+        for (source, record) in project.sources().iter().zip(records) {
+            let input = &self.sources[source.input_index()];
+            if let Some(index) = record
+                && let SourceOrigin::Disk(path) = &input.origin
             {
                 staged.insert(DiskSyntax {
                     path: path.clone(),
-                    id: source.id.clone(),
-                    index: CachedCircuitRecovery::analyze_with_build_index(source.text.to_string()),
+                    id: input.id.clone(),
+                    index,
                 });
             }
         }
-        staged
+        Ok((project, staged))
     }
 
     /// 開いている文書と閉じたファイルの解析候補を、スナップショットと同じ順で返す。
@@ -653,16 +684,15 @@ mod tests {
         };
         let (_, loaded) = SourceSet::load(open, [open].into_iter()).unwrap();
         let mut disk = DiskSyntaxCache::default();
-        assert!(loaded.parse_strict_with_disk_cache(Some(&disk)).is_ok());
-        let staged = loaded.stage_disk_indexes(&disk);
+        let (_, staged) = loaded.parse_strict_recording_disk_indexes(&disk).unwrap();
         assert!(loaded.still_current([(&uri, "main.ncg2")]));
         disk.extend(staged);
         assert!(disk.candidate(&basis, "basis.ncg2").is_some());
         assert!(disk.candidate(&basis, "other.ncg2").is_none());
 
         let (_, loaded) = SourceSet::load(open, [open].into_iter()).unwrap();
-        assert!(loaded.parse_strict_with_disk_cache(Some(&disk)).is_ok());
-        assert!(loaded.stage_disk_indexes(&disk).entries.is_empty());
+        let (_, staged) = loaded.parse_strict_recording_disk_indexes(&disk).unwrap();
+        assert!(staged.entries.is_empty());
 
         // 同じ長さの別本文で、開いた文書にも構文違反があっても先頭の閉文書を診断する。
         fs::write(&basis, ")using nor)").unwrap();
@@ -677,7 +707,7 @@ mod tests {
             id,
             revision,
             error,
-        }) = loaded.parse_strict_with_disk_cache(Some(&disk))
+        }) = loaded.parse_strict_recording_disk_indexes(&disk)
         else {
             panic!("expected the first disk source's syntax error");
         };
