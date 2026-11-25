@@ -7,7 +7,10 @@ use std::{
     process::ExitCode,
 };
 
-use circuitgame2_core::editor::{LineIndex, PositionEncoding, TextPosition, apply_source_edit};
+use circuitgame2_core::{
+    editor::{LineIndex, PositionEncoding, TextPosition, apply_source_edit},
+    syntax::circuit::CachedCircuitRecovery,
+};
 use lsp_server::{ErrorCode, Message, Notification, Request, Response};
 use lsp_types::{
     CompletionOptions, CompletionParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
@@ -33,7 +36,7 @@ enum State {
 
 struct Document {
     version: i32,
-    text: Option<String>,
+    analysis: Option<CachedCircuitRecovery>,
     syntax: Vec<lsp_types::Diagnostic>,
     published: Option<(i32, Vec<lsp_types::Diagnostic>)>,
 }
@@ -317,10 +320,11 @@ impl Server {
                     return None;
                 }
                 let encoding = self.encoding?;
+                let analysis = CachedCircuitRecovery::analyze(item.text);
                 let mut document = Document {
                     version: item.version,
-                    syntax: diagnostic::collect(&item.uri, &item.text, encoding),
-                    text: Some(item.text),
+                    syntax: diagnostic::collect(&item.uri, &analysis, encoding),
+                    analysis: Some(analysis),
                     published: None,
                 };
                 let syntax = document.publish_syntax(&item.uri);
@@ -345,9 +349,9 @@ impl Server {
                     .and_then(|changes| decode(changes.take()));
                 document.change(item.version, changes, encoding);
                 document.syntax = document
-                    .text
+                    .analysis
                     .as_ref()
-                    .map(|text| diagnostic::collect(&item.uri, text, encoding))
+                    .map(|analysis| diagnostic::collect(&item.uri, analysis, encoding))
                     .unwrap_or_default();
                 Some(DocumentUpdate {
                     uri: item.uri.clone(),
@@ -485,7 +489,8 @@ impl Document {
     fn open_snapshot<'a>(&'a self, uri: &'a Uri) -> OpenDocument<'a> {
         OpenDocument {
             uri,
-            text: self.text.as_deref(),
+            text: self.analysis.as_ref().map(CachedCircuitRecovery::text),
+            analysis: self.analysis.as_ref(),
             version: self.version,
         }
     }
@@ -498,14 +503,26 @@ impl Document {
         changes: Option<Vec<TextDocumentContentChangeEvent>>,
         encoding: PositionEncoding,
     ) {
-        let result = changes
-            .ok_or("変更一覧の構造が不正。")
-            .and_then(|changes| apply_changes(self.text.as_deref(), changes, encoding));
+        let result = changes.ok_or("変更一覧の構造が不正。").and_then(|changes| {
+            apply_changes(
+                self.analysis.as_ref().map(CachedCircuitRecovery::text),
+                changes,
+                encoding,
+            )
+        });
         self.version = version;
         match result {
-            Ok(text) => self.text = Some(text.into_owned()),
+            Ok(text) => {
+                if self
+                    .analysis
+                    .as_ref()
+                    .is_none_or(|prior| prior.reuse(&text).is_none())
+                {
+                    self.analysis = Some(CachedCircuitRecovery::analyze(text.into_owned()));
+                }
+            }
             Err(reason) => {
-                self.text = None;
+                self.analysis = None;
                 eprintln!("文書版 {version} の変更を適用できない。{reason}");
             }
         }

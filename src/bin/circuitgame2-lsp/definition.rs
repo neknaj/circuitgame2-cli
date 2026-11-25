@@ -91,6 +91,7 @@ mod tests {
             uri: &uri,
             text: Some(&text),
             version: 1,
+            analysis: None,
         };
         let query = |line, column| {
             locate(
@@ -126,6 +127,7 @@ mod tests {
             uri: &uri,
             text: Some(text),
             version: 1,
+            analysis: None,
         };
         let query = |line, column| {
             locate(
