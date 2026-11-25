@@ -6,7 +6,7 @@ use circuitgame2_core::{
     ncg2m::file::MetaItemKind,
     project::{
         AliasConflict, AliasDisposition, DefinitionAnalysisError, FuncArityError, FuncCallTarget,
-        LocatedName, MixedAbsoluteTarget, MixedUseAliasConflict, MixedUseAliases,
+        LocatedName, MixedAbsoluteTarget, MixedUseAliasConflict, MixedUseAliases, MixedUseTargets,
         ParsedProjectSources, ProjectSource, ProjectSourceIndex, SourceSnapshot, UseSite,
         check_mixed_use_aliases, index_mixed_use_targets, parse_project_sources,
         validate_mixed_circuit_basis,
@@ -17,6 +17,9 @@ use circuitgame2_core::{
 use super::{check_body, check_report::Report, diagnostic};
 
 mod errors;
+mod evaluate;
+
+pub(super) use evaluate::{evaluate, parse_argument};
 
 /// 共通の宣言と別名を解決し、すべての補助関数の型と呼び出し関係を検査する。
 pub(super) fn check(
@@ -24,45 +27,9 @@ pub(super) fn check(
     report: &mut Option<&mut Report<'_>>,
     contextualize: impl Fn(String) -> String,
 ) -> Result<usize, String> {
-    let project = parse_project_sources(snapshots)
-        .map_err(|error| contextualize(errors::parse(error, report)))?;
-    if let Some(report) = report {
-        report.files = Some(project.sources().len());
-    }
-    validate_mixed_circuit_basis(&project).map_err(|error| {
-        let error = DefinitionAnalysisError::Basis(error);
-        if let Some(report) = report {
-            report.analysis_error(&error);
-        }
-        contextualize(diagnostic::analysis_error(error))
-    })?;
-    let targets = index_mixed_use_targets(&project).map_err(|error| {
-        let error = DefinitionAnalysisError::UseTarget(error);
-        if let Some(report) = report {
-            report.analysis_error(&error);
-        }
-        contextualize(diagnostic::analysis_error(error))
-    })?;
-    let aliases = check_mixed_use_aliases(&targets)
-        .map_err(|error| contextualize(alias_conflict(error, report)))?;
-    let directives = targets.directives();
-    for (directive, disposition) in directives.iter().zip(aliases.dispositions()) {
-        if let AliasDisposition::Duplicate { first } = disposition {
-            let first = &directives[*first].site;
-            if let Some(report) = report {
-                report.duplicate_use(&directive.site, first);
-            } else {
-                eprintln!(
-                    "{}",
-                    contextualize(format!(
-                        "{} 同じ別名と参照先が重複している。\n  最初の指定 {}",
-                        diagnostic::located(&alias_name(&directive.site)),
-                        diagnostic::located(&alias_name(first)),
-                    ))
-                );
-            }
-        }
-    }
+    let project = parse_sources(snapshots, report, &contextualize)?;
+    let targets = resolve_targets(&project, report, &contextualize)?;
+    let aliases = resolve_aliases(&targets, report, &contextualize)?;
     aliases
         .plan_defn_calls()
         .map_err(|error| contextualize(errors::calls(&project, error, report)))?;
@@ -103,6 +70,68 @@ pub(super) fn check(
         }
     }
     Ok(project.sources().len())
+}
+
+fn parse_sources<'a>(
+    snapshots: &[SourceSnapshot<'a>],
+    report: &mut Option<&mut Report<'_>>,
+    contextualize: &impl Fn(String) -> String,
+) -> Result<ParsedProjectSources<'a>, String> {
+    let project = parse_project_sources(snapshots)
+        .map_err(|error| contextualize(errors::parse(error, report)))?;
+    if let Some(report) = report {
+        report.files = Some(project.sources().len());
+    }
+    validate_mixed_circuit_basis(&project).map_err(|error| {
+        let error = DefinitionAnalysisError::Basis(error);
+        if let Some(report) = report {
+            report.analysis_error(&error);
+        }
+        contextualize(diagnostic::analysis_error(error))
+    })?;
+    Ok(project)
+}
+
+fn resolve_targets<'p, 'a>(
+    project: &'p ParsedProjectSources<'a>,
+    report: &mut Option<&mut Report<'_>>,
+    contextualize: &impl Fn(String) -> String,
+) -> Result<MixedUseTargets<'p, 'a>, String> {
+    index_mixed_use_targets(project).map_err(|error| {
+        let error = DefinitionAnalysisError::UseTarget(error);
+        if let Some(report) = report {
+            report.analysis_error(&error);
+        }
+        contextualize(diagnostic::analysis_error(error))
+    })
+}
+
+fn resolve_aliases<'t, 'p, 'a>(
+    targets: &'t MixedUseTargets<'p, 'a>,
+    report: &mut Option<&mut Report<'_>>,
+    contextualize: &impl Fn(String) -> String,
+) -> Result<MixedUseAliases<'t, 'p, 'a>, String> {
+    let aliases = check_mixed_use_aliases(targets)
+        .map_err(|error| contextualize(alias_conflict(error, report)))?;
+    let directives = targets.directives();
+    for (directive, disposition) in directives.iter().zip(aliases.dispositions()) {
+        if let AliasDisposition::Duplicate { first } = disposition {
+            let first = &directives[*first].site;
+            if let Some(report) = report {
+                report.duplicate_use(&directive.site, first);
+            } else {
+                eprintln!(
+                    "{}",
+                    contextualize(format!(
+                        "{} 同じ別名と参照先が重複している。\n  最初の指定 {}",
+                        diagnostic::located(&alias_name(&directive.site)),
+                        diagnostic::located(&alias_name(first)),
+                    ))
+                );
+            }
+        }
+    }
+    Ok(aliases)
 }
 
 /// 関数の定義をソース順に調べ、呼び出し名または入力個数の最初の違反を返す。

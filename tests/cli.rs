@@ -57,6 +57,69 @@ fn check_reads_ncg2m_directly_and_through_project_settings() {
 }
 
 #[test]
+fn eval_meta_selects_a_checked_helper_and_respects_the_fuel_budget() {
+    let folder = tempfile::tempdir().unwrap();
+    let dir = folder.path();
+    let settings = dir.join("circuitgame2.toml");
+    fs::write(
+        &settings,
+        "sources = [\"main.ncg2m\", \"helper.ncg2m\"]\n[[device]]\nname = \"uart\"\nkind = \"uart-terminal\"\nbindings = {}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("main.ncg2m"),
+        "(use ::tools::choose choose) (defn entry (as-type (Fn (Bool Int Int) Int) (fn (flag yes no) (choose flag yes no))))",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("helper.ncg2m"),
+        "(namespace tools (export choose)
+            (defn choose (as-type (Fn (Bool Int Int) Int) (fn (flag yes no) (if flag yes no))))
+            (defn private (as-type (Fn () Bool) (fn () true))))",
+    )
+    .unwrap();
+    let invoke = |name: &str, options: &[&str]| {
+        let mut command = vec!["eval-meta", "--defn", name];
+        command.extend_from_slice(options);
+        command.extend(["--project", settings.to_str().unwrap()]);
+        cli(&command)
+    };
+    let arguments = [
+        "--arg",
+        "true",
+        "--arg",
+        "Int:-9223372036854775808",
+        "--arg",
+        "Int:42",
+    ];
+    let output = invoke("::entry", &arguments);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"-9223372036854775808\n");
+    assert!(output.stderr.is_empty());
+
+    let mut limited = arguments.to_vec();
+    limited.extend(["--fuel", "1"]);
+    let output = invoke("::entry", &limited);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+
+    let output = invoke(
+        "::entry",
+        &["--arg", "true", "--arg", "Nat:0", "--arg", "Int:42"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("main.ncg2m") && error.contains("2 番目の引数は Int"));
+
+    let output = invoke("::tools::private", &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("helper.ncg2m") && error.contains("非公開"));
+}
+
+#[test]
 fn check_resolves_a_cross_language_use_before_reporting_the_unsupported_circuit_check() {
     let folder = tempfile::tempdir().unwrap();
     let dir = folder.path();

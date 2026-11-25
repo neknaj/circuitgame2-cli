@@ -340,20 +340,21 @@ fn expression_type(error: ExpressionTypeError<'_>) -> ExpressionDiagnostic {
                 data_type(actual)
             ),
         ),
-        ExpressionTypeError::Integer { span, error } => {
-            let reason = match error {
-                IntegerLiteralError::InvalidDigits => "十進整数を ASCII の数字で指定する。".into(),
-                IntegerLiteralError::NegativeLiteralForNat => {
-                    "`Nat` の位置には負号付きの整数を書けない。".into()
-                }
-                IntegerLiteralError::OutOfRange(ty) => {
-                    format!("整数リテラルが `{}` の範囲を外れる。", integer_type(ty))
-                }
-            };
-            (span, reason)
-        }
+        ExpressionTypeError::Integer { span, error } => (span, integer_literal_message(error)),
     };
     (span, message, None)
+}
+
+pub(super) fn integer_literal_message(error: IntegerLiteralError) -> String {
+    match error {
+        IntegerLiteralError::InvalidDigits => "十進整数を ASCII の数字で指定する。".into(),
+        IntegerLiteralError::NegativeLiteralForNat => {
+            "`Nat` の位置には負号付きの整数を書けない。".into()
+        }
+        IntegerLiteralError::OutOfRange(ty) => {
+            format!("整数リテラルが `{}` の範囲を外れる。", integer_type(ty))
+        }
+    }
 }
 
 fn integer_type(ty: IntegerType) -> &'static str {
@@ -363,7 +364,7 @@ fn integer_type(ty: IntegerType) -> &'static str {
     }
 }
 
-fn data_type(ty: DataType<'_>) -> String {
+pub(super) fn data_type(ty: DataType<'_>) -> String {
     let atom = match ty.atom {
         DataTypeAtom::Named(name) => name,
         DataTypeAtom::Builtin(BuiltinDataType::Bool) => "Bool",

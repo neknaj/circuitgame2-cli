@@ -38,18 +38,21 @@ ncg2 dump examples/nor.ncg2
 
 `dump` は構文木、宣言、参照の索引を出力する。構文が正しければ、解決できない名前を含むファイルでも参照の位置を調べられる。両コマンドで `--project circuitgame2.toml` を指定できる。範囲の `start` は UTF-8 のバイト位置で、`end` の位置は含まない。
 
-## NCG2M の補助関数を検査する
+## NCG2M の補助関数を検査・評価する
 
 [補助関数の例題](examples/helpers.ncg2m)では、別の名前空間で公開した `ready` を別名で取り込み、`startup-ready` から呼び出す。
 
 ```sh
 ncg2 check examples/helpers.ncg2m
 ncg2 check --format json examples/helpers.ncg2m
+ncg2 eval-meta --defn ::startup-ready examples/helpers.ncg2m
 ```
 
 `check` は `defn` の本体の型と呼び出しの循環を静的に検査する。`--project` を使う場合は、設定ファイルの `sources` に `.ncg2m` のパスを並べる。実行段階が決まるまで検査できない式や、対応していないマクロ本体は、その位置を診断して終了コード 1 を返す。
 
 `.ncg2` と `.ncg2m` を含む場合は、両言語の構文と回路の基底を先に検査し、共有宣言、公開、別名と `defn` を調べる。続いて、`func` の呼び出し先を解決し、引数の個数を検査する。ここまでの検査が通った場合は、回路本体の検査が未対応であることを報告し、終了コード 1 を返す。
+
+`eval-meta` は指定した補助関数を評価し、結果を標準出力に1行で書く。引数は宣言順に `--arg true`、`--arg false`、`--arg Nat:10`、`--arg Int:-3` のように渡す。対応する式は真偽値と固定長整数のリテラル、仮引数の参照、`if`、補助関数の呼び出し。`--fuel` で指定した回数で評価が終わらなかった場合は、値を出力せず終了コード 2 を返す。Unix と Windows では Ctrl+C で評価を中断できる。中断した場合は標準出力に値を書かず、終了コード 130 を返す。
 
 ## 順序回路を動かす
 

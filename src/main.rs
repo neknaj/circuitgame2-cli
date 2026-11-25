@@ -23,6 +23,7 @@ use std::{
 
 use circuitgame2_cli::config;
 use circuitgame2_core::{
+    ncg2m::call_evaluation::scalar::ScalarValue,
     project::{
         CircuitProject, DefinitionAnalysisError, ModuleBodyPosition, NameKey,
         PreparedDefinitionError, SourceKind, SourceSnapshot, UseAliases, UseTargets,
@@ -42,6 +43,8 @@ const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価して�
   ncg2 fmt [--check | --write] <ファイル>\n\
   ncg2 eval --func <関数名> --input <ビット列> <ファイル>...\n\
   ncg2 eval --func <関数名> --input <ビット列> --project <設定ファイル>\n\
+  ncg2 eval-meta --defn <名前> [--arg <値>]... [--fuel <回数>] <ファイル>...\n\
+  ncg2 eval-meta --defn <名前> [--arg <値>]... [--fuel <回数>] --project <設定ファイル>\n\
   ncg2 run [--entry <モジュール名>] [--input <ビット列> ... | --ticks <回数>] <ファイル>...\n\
   ncg2 run --project <設定ファイル> [--input <ビット列> ... | --ticks <回数>] [--vram <公開名>]...\n\
   ncg2 settle [--within <tick 数> [--period <間隔>]] [--entry <モジュール名>] <ファイル>...\n\
@@ -54,6 +57,7 @@ const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価して�
 --project を使う場合、ソースは設定ファイルのディレクトリを基準に読む。\n\
 run と settle の --project はソースファイルの列挙や --entry と併用できない。\n\
 宣言名には ::gate や ::lib::gate のような完全修飾名を使う。\n\
+eval-meta の --arg は true、false、Nat:<十進整数>、Int:<十進整数>。\n\
 run の既定の開始点は ::main。--input 一つにつき 1 tick 進める。\n\
 入力ポートがない回路は --ticks <回数> で指定回数だけ進める。--input= でも 1 tick 進められる。\n\
 --ticks と --input は併用できない。--ticks 0 は reset 直後の出力だけを表示する。\n\
@@ -90,6 +94,12 @@ enum Command<'a> {
     Eval {
         name: &'a str,
         input: &'a str,
+        sources: SourceInput<'a>,
+    },
+    EvalMeta {
+        name: &'a str,
+        arguments: Vec<ScalarValue>,
+        fuel: Option<NonZeroU64>,
         sources: SourceInput<'a>,
     },
     Run {
@@ -354,6 +364,43 @@ fn nor_count_command(mut args: &[String]) -> Result<Command<'_>, String> {
     Ok(Command::NorCount { entry, sources })
 }
 
+fn eval_meta_command(args: &[String]) -> Result<Command<'_>, String> {
+    let [flag, name, rest @ ..] = args else {
+        return Err("eval-meta には --defn と補助関数名を指定する。".into());
+    };
+    if flag != "--defn" || name.starts_with('-') {
+        return Err("eval-meta には --defn と補助関数名を指定する。".into());
+    }
+    let mut remaining = rest;
+    let mut arguments = Vec::new();
+    let mut fuel = None;
+    while let Some((option, rest)) = remaining.split_first() {
+        match option.as_str() {
+            "--arg" => {
+                let (value, next) = option_value(option, rest)?;
+                arguments.push(check_ncg2m::parse_argument(value, arguments.len() + 1)?);
+                remaining = next;
+            }
+            "--fuel" if fuel.is_none() => {
+                let (value, next) = option_value(option, rest)?;
+                fuel = Some(value.parse().map_err(|_| "--fuel に正の回数を指定する。")?);
+                remaining = next;
+            }
+            "--project" | "--" => break,
+            option if option.starts_with('-') => {
+                return Err(format!("eval-meta のオプション {option} を確認する。"));
+            }
+            _ => break,
+        }
+    }
+    Ok(Command::EvalMeta {
+        name,
+        arguments,
+        fuel,
+        sources: source_input(remaining)?,
+    })
+}
+
 fn command(args: &[String]) -> Result<Command<'_>, String> {
     match args {
         [flag] if flag == "--help" || flag == "-h" => Ok(Command::Help),
@@ -377,6 +424,7 @@ fn command(args: &[String]) -> Result<Command<'_>, String> {
         [dump, files @ ..] if dump == "dump" => Ok(Command::Dump(source_input(files)?)),
         [count, args @ ..] if count == "nor-count" => nor_count_command(args),
         [format, args @ ..] if format == "fmt" => formatting::command(args).map(Command::Format),
+        [eval, args @ ..] if eval == "eval-meta" => eval_meta_command(args),
         [eval, func_flag, name, input_flag, input, files @ ..]
             if eval == "eval"
                 && func_flag == "--func"
@@ -576,12 +624,14 @@ fn execute(
         | Command::Dump(sources)
         | Command::NorCount { sources, .. }
         | Command::Eval { sources, .. }
+        | Command::EvalMeta { sources, .. }
         | Command::Run { sources, .. }
         | Command::Settle { sources, .. } => *sources,
     };
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
     let check_ncg2m = matches!(command, Command::Check { .. });
+    let allow_meta = check_ncg2m || matches!(command, Command::EvalMeta { .. });
     let settings = match input {
         SourceInput::Files(files) => {
             for path in files {
@@ -589,7 +639,7 @@ fn execute(
                     &mut sources,
                     &mut seen,
                     Path::new(""),
-                    source_path(path, false, check_ncg2m)?,
+                    source_path(path, false, allow_meta)?,
                 )?;
             }
             None
@@ -599,6 +649,7 @@ fn execute(
             let settings = if matches!(
                 command,
                 Command::Check { .. }
+                    | Command::EvalMeta { .. }
                     | Command::Dump(_)
                     | Command::NorCount { .. }
                     | Command::RpPlan { .. }
@@ -616,7 +667,7 @@ fn execute(
             };
             let base = path.parent().unwrap_or(Path::new(""));
             for value in settings.sources.get_ref() {
-                let result = source_path(value.get_ref(), true, check_ncg2m)
+                let result = source_path(value.get_ref(), true, allow_meta)
                     .and_then(|source| read_source(&mut sources, &mut seen, base, source));
                 result.map_err(|error| {
                     if let Some(report) = &mut report {
@@ -640,8 +691,19 @@ fn execute(
         Some((path, _)) => config::source_diagnostic(path, &message),
         None => message,
     };
+    if let Command::EvalMeta {
+        name,
+        arguments,
+        fuel,
+        ..
+    } = command
+    {
+        return check_ncg2m::evaluate(&snapshots, name, arguments, fuel, stdout, source_diagnostic);
+    }
     if check_ncg2m
-        && sources.iter().any(|(_, _, kind)| *kind == SourceKind::Functional)
+        && sources
+            .iter()
+            .any(|(_, _, kind)| *kind == SourceKind::Functional)
     {
         let files = check_ncg2m::check(&snapshots, &mut report, &source_diagnostic)?;
         if let Some((path, settings)) = &settings
