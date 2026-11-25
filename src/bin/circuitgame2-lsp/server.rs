@@ -771,11 +771,11 @@ impl Document {
             self.analysis = prior;
             return;
         }
-        let AppliedChanges { text, single_edit } = applied;
+        let AppliedChanges { text, edit_range } = applied;
         let text = text.into_owned();
         let local = match prior {
             Some(DocumentAnalysis::Local { recovery, .. }) => Some(recovery),
-            Some(DocumentAnalysis::Full(old)) => single_edit.and_then(|range| {
+            Some(DocumentAnalysis::Full(old)) => edit_range.and_then(|range| {
                 LocalRecovery::remember(&old, sources::core_revision(previous_version), range)
             }),
             Some(DocumentAnalysis::Functional { .. }) | None => None,
@@ -796,7 +796,8 @@ impl Document {
 
 struct AppliedChanges<'a> {
     text: Cow<'a, str>,
-    single_edit: Option<Range<usize>>,
+    // 編集前の本文上で範囲編集が収まる範囲。全文置換を含む場合は使わない。
+    edit_range: Option<Range<usize>>,
 }
 
 fn apply_changes(
@@ -805,11 +806,13 @@ fn apply_changes(
     encoding: PositionEncoding,
 ) -> Result<AppliedChanges<'_>, &'static str> {
     let mut current = text.map(Cow::Borrowed);
-    let single_change = changes.len() == 1;
-    let mut single_edit = None;
+    let mut original_len = text.map(str::len);
+    let mut edit_range: Option<Range<usize>> = None;
     for change in changes {
         let Some(range) = change.range else {
             current = Some(Cow::Owned(change.text));
+            original_len = None;
+            edit_range = None;
             continue;
         };
         let source = current
@@ -828,13 +831,21 @@ fn apply_changes(
         edited.push_str(parts.prefix);
         edited.push_str(parts.replacement);
         edited.push_str(parts.suffix);
-        if single_change {
-            single_edit = Some(start..end);
+        if let Some(original_len) = original_len {
+            let suffix = source.len() - end;
+            // 後の編集位置は変更後の本文を指す。前後に残る未変更のバイト数で元の範囲を広げる。
+            edit_range = Some(match edit_range {
+                None => start..end,
+                Some(prior) => {
+                    let unchanged_suffix = (original_len - prior.end).min(suffix);
+                    prior.start.min(start)..original_len - unchanged_suffix
+                }
+            });
         }
         current = Some(Cow::Owned(edited));
     }
     let text = current.ok_or("本文を全文置換で受け取る必要がある。")?;
-    Ok(AppliedChanges { text, single_edit })
+    Ok(AppliedChanges { text, edit_range })
 }
 
 fn text_position(position: lsp_types::Position) -> Result<TextPosition, &'static str> {
@@ -901,9 +912,11 @@ mod tests {
             analysis: Some(DocumentAnalysis::Full(analysis)),
             published: None,
         };
-        let input = replacement(original, "🐈", "🦊漢");
-        let after_first = original.replace("🐈", "🦊漢");
-        document.change(&uri, -3, Some(vec![input]), encoding);
+        let name = replacement(original, "first", "first-long");
+        let renamed = original.replace("first", "first-long");
+        let emoji = replacement(&renamed, "🐈", "🦊漢");
+        let after_first = renamed.replace("🐈", "🦊漢");
+        document.change(&uri, -3, Some(vec![name, emoji]), encoding);
         assert!(matches!(
             &document.analysis,
             Some(DocumentAnalysis::Local { .. })
@@ -921,8 +934,8 @@ mod tests {
         };
         assert_eq!(document.syntax, expect(&after_first));
 
-        let first = replacement(&after_first, "first", "f");
-        let intermediate = after_first.replace("first", "f");
+        let first = replacement(&after_first, "first-long", "f");
+        let intermediate = after_first.replace("first-long", "f");
         let second = replacement(&intermediate, "漢", "あいう");
         let after_both = intermediate.replace("漢", "あいう");
         document.change(&uri, -2, Some(vec![first, second]), encoding);
