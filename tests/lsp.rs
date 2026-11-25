@@ -404,6 +404,52 @@ fn completion_replaces_the_original_module_part_name_after_a_syntax_error() {
     assert!(response(5).is_null());
 }
 
+#[test]
+fn completion_follows_open_dependency_edits_and_close() {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/project");
+    let basis = Url::from_file_path(project.join("basis.ncg2")).unwrap();
+    let main = Url::from_file_path(project.join("main.ncg2")).unwrap();
+    let open = |uri: &Url, text| {
+        notification(
+            "textDocument/didOpen",
+            json!({"textDocument": {"uri": uri.as_str(), "languageId": "ncg2", "version": 1, "text": text}}),
+        )
+    };
+    let completion = |id| {
+        request(
+            id,
+            "textDocument/completion",
+            json!({"textDocument": {"uri": main.as_str()}, "position": {"line": 0, "character": 15}}),
+        )
+    };
+    let responses = exchange([
+        request(1, "initialize", json!({"capabilities": {}})),
+        notification("initialized", json!({})),
+        open(&basis, "(using nor) (module gate (in x) (out y)) (bad)"),
+        open(&main, "(module-part ga (def y x))"),
+        completion(2),
+        notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": basis.as_str(), "version": 2},
+                "contentChanges": [{"text": ") (using nor) (module gait (in x) (out y))"}]
+            }),
+        ),
+        completion(3),
+        notification(
+            "textDocument/didClose",
+            json!({"textDocument": {"uri": basis.as_str()}}),
+        ),
+        completion(4),
+        request(5, "shutdown", Value::Null),
+        notification("exit", Value::Null),
+    ]);
+    let result = |id| &responses.iter().find(|value| value["id"] == id).unwrap()["result"];
+    assert_eq!(result(2)["items"][0]["label"], "gate");
+    assert_eq!(result(3)["items"][0]["label"], "gait");
+    assert_eq!(result(4)["items"], json!([]));
+}
+
 fn exchange(messages: impl IntoIterator<Item = Message>) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_circuitgame2-lsp"))
         .stdin(Stdio::piped())

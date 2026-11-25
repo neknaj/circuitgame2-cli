@@ -5,7 +5,8 @@ use std::collections::BTreeSet;
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding, TextPosition},
     project::{
-        ObservedCircuitBindingKind, collect_sources, inspect_circuit_project, normalize_path,
+        ObservedCircuitBindingKind, collect_sources, inspect_circuit_project_with_cache,
+        normalize_path,
     },
 };
 use lsp_types::{CompletionItem, CompletionItemKind, CompletionList, CompletionTextEdit, TextEdit};
@@ -30,7 +31,7 @@ pub(super) fn collect<'a>(
     let file = source_list
         .iter()
         .position(|source| source.id.same_file(&path))?;
-    let project = inspect_circuit_project(&source_list);
+    let project = inspect_circuit_project_with_cache(&source_list, &sources.syntax_cache());
     let result = project.module_part_candidates(file, offset)?;
     let target = sources.location(result.replace, encoding)?;
     if &target.uri != current.uri || target.range.start.line != target.range.end.line {

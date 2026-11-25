@@ -11,6 +11,7 @@ use circuitgame2_cli::config;
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding},
     project::{LocatedName, ProjectSource, SourceSnapshot, normalize_path},
+    syntax::circuit::CachedCircuitRecovery,
 };
 use lsp_types::{Location, Uri};
 use url::Url;
@@ -23,6 +24,7 @@ pub(super) struct OpenDocument<'a> {
     pub(super) uri: &'a Uri,
     pub(super) text: Option<&'a str>,
     pub(super) version: i32,
+    pub(super) analysis: Option<&'a CachedCircuitRecovery>,
 }
 
 struct Source<'a> {
@@ -31,6 +33,7 @@ struct Source<'a> {
     text: Cow<'a, str>,
     revision: u64,
     origin: SourceOrigin,
+    analysis: Option<&'a CachedCircuitRecovery>,
 }
 
 enum SourceOrigin {
@@ -183,6 +186,11 @@ impl<'a> SourceSet<'a> {
                 revision: source.revision,
             })
             .collect()
+    }
+
+    /// 開いている文書の回復結果を、ソーススナップショットと同じ順で返す。
+    pub(super) fn syntax_cache(&self) -> Vec<Option<&CachedCircuitRecovery>> {
+        self.sources.iter().map(|source| source.analysis).collect()
     }
 
     /// 応答を公開する直前に、設定の選択とディスクから読んだ本文を照合する。
@@ -365,6 +373,7 @@ fn opened<'a>(id: String, doc: &OpenDocument<'a>) -> Result<Source<'a>, String> 
         text: Cow::Borrowed(text),
         revision,
         origin: SourceOrigin::Editor(None),
+        analysis: doc.analysis,
     })
 }
 
@@ -382,6 +391,7 @@ fn on_disk<'a>(id: String, path: &Path) -> Result<Source<'a>, String> {
         text: Cow::Owned(text),
         revision: 0,
         origin: SourceOrigin::Disk(path.to_path_buf()),
+        analysis: None,
     })
 }
 
@@ -548,6 +558,7 @@ mod tests {
             uri: &uri,
             text: Some("開いている本文"),
             version: 1,
+            analysis: None,
         };
         let (_, loaded) = SourceSet::load(open, [open].into_iter()).unwrap();
         let members = [(&uri, "main.ncg2")];

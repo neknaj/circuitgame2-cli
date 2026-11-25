@@ -11,8 +11,8 @@ use circuitgame2_core::{
     syntax::{
         ErrorKind, Repair,
         circuit::{
-            CircuitFormError, CircuitRecovery, Clause, Head, HeaderError, RecoveredFormOutcome,
-            recover_circuit_forms,
+            CachedCircuitRecovery, CircuitFormError, CircuitRecovery, Clause, Head, HeaderError,
+            RecoveredFormOutcome,
         },
     },
 };
@@ -32,21 +32,28 @@ struct Report {
 }
 
 /// 元のバイト範囲も添え、主範囲の位置順で診断を返す。
-pub(super) fn collect(uri: &Uri, source: &str, encoding: PositionEncoding) -> Vec<Diagnostic> {
-    let mut reports = match recover_circuit_forms(source) {
+pub(super) fn collect(
+    uri: &Uri,
+    analysis: &CachedCircuitRecovery,
+    encoding: PositionEncoding,
+) -> Vec<Diagnostic> {
+    let source = analysis.text();
+    let mut reports = match analysis.recovery() {
         CircuitRecovery::Complete(_) => return Vec::new(),
         CircuitRecovery::Inspected { checked, .. } => checked
-            .into_iter()
-            .filter_map(|item| match item.outcome {
+            .iter()
+            .filter_map(|item| match &item.outcome {
                 RecoveredFormOutcome::Valid(_) => None,
-                RecoveredFormOutcome::Rejected { kind, span, .. } => Some(header(kind, span)),
+                RecoveredFormOutcome::Rejected { kind, span, .. } => {
+                    Some(header(*kind, span.clone()))
+                }
             })
             .collect(),
         CircuitRecovery::WithSyntaxRepairs {
             recovered,
             original,
         } => {
-            let mut reports: Vec<_> = recovered.repairs.into_iter().map(repair).collect();
+            let mut reports: Vec<_> = recovered.repairs.iter().map(repair).collect();
             reports.extend(
                 original
                     .iter()
@@ -236,17 +243,19 @@ pub(super) fn wire_range(
     ))
 }
 
-fn repair(value: Repair) -> Report {
+fn repair(value: &Repair) -> Report {
     match value {
-        Repair::Skipped { error, .. } => syntax(error.kind, error.span),
-        Repair::InsertedSeparator { offset } => syntax(ErrorKind::MissingSeparator, offset..offset),
+        Repair::Skipped { error, .. } => syntax(error.kind, error.span.clone()),
+        Repair::InsertedSeparator { offset } => {
+            syntax(ErrorKind::MissingSeparator, *offset..*offset)
+        }
         Repair::InsertedClose {
             offset, opening, ..
         } => Report {
-            span: offset..offset,
+            span: *offset..*offset,
             code: "UnclosedList",
             message: "閉じ括弧 `)` が必要。".into(),
-            related: Some((opening, "対応する開き括弧")),
+            related: Some((opening.clone(), "対応する開き括弧")),
         },
     }
 }
