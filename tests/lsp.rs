@@ -319,11 +319,19 @@ fn ncg2m_outline_uses_current_document_and_real_namespace_blocks() {
                 "textDocument/didChange",
                 json!({
                     "textDocument": {"uri": uri, "version": 4},
-                    "contentChanges": [{"text": "(defmacro fresh () (quote value))"}]
+                    "contentChanges": [{"text": format!("{damaged})")}]
                 }),
             ),
             request(5, "textDocument/documentSymbol", document.clone()),
-            request(6, "shutdown", Value::Null),
+            notification(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": {"uri": uri, "version": 5},
+                    "contentChanges": [{"text": "(defmacro fresh () (quote value))"}]
+                }),
+            ),
+            request(6, "textDocument/documentSymbol", document.clone()),
+            request(7, "shutdown", Value::Null),
             notification("exit", Value::Null),
         ]);
         let result = |id| {
@@ -386,7 +394,7 @@ fn ncg2m_outline_uses_current_document_and_real_namespace_blocks() {
             json!([opening, opening + 1])
         );
         let recovered = result(4).as_array().unwrap();
-        assert_eq!(recovered.len(), symbols.len());
+        assert_eq!(recovered.len(), symbols.len() + usize::from(hierarchical));
         let mut moved = ready_span.clone();
         moved["start"]["line"] = 2.into();
         moved["end"]["line"] = 2.into();
@@ -394,13 +402,24 @@ fn ncg2m_outline_uses_current_document_and_real_namespace_blocks() {
             assert_eq!(recovered[0]["children"][1]["name"], "ready");
             assert_eq!(recovered[0]["children"][1]["selectionRange"], moved);
             assert_eq!(recovered[1]["children"][0]["name"], "other");
+            assert_eq!(recovered[2]["name"], "hidden");
+            assert_eq!(recovered[2]["detail"], "所属未確定");
+            assert_eq!(
+                recovered[2]["selectionRange"]["start"],
+                json!({"line": 4, "character": 31})
+            );
+            assert_eq!(result(5)[2]["name"], "uncertain");
+            assert_eq!(result(5)[2]["children"][0]["name"], "hidden");
+            assert_eq!(result(5)[2]["children"][0]["detail"], "defmacro");
         } else {
             assert_eq!(recovered[2]["name"], "ready");
             assert_eq!(recovered[2]["location"]["range"], moved);
             assert_eq!(recovered[4]["name"], "other");
+            assert_eq!(result(5)[6]["name"], "hidden");
+            assert_eq!(result(5)[6]["containerName"], "uncertain");
         }
-        assert_eq!(result(5).as_array().unwrap().len(), 1);
-        assert_eq!(result(5)[0]["name"], "fresh");
+        assert_eq!(result(6).as_array().unwrap().len(), 1);
+        assert_eq!(result(6)[0]["name"], "fresh");
     }
 }
 

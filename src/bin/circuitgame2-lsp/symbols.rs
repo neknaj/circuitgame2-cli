@@ -4,7 +4,10 @@ use std::{collections::HashMap, ops::Range};
 
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding},
-    ncg2m::file::{MetaItem, MetaItemKind, recovery::OriginalMetaList},
+    ncg2m::file::{
+        MetaItem, MetaItemKind,
+        recovery::{OriginalMetaList, ProvisionalMetaDeclaration},
+    },
     syntax::{
         Form,
         circuit::{
@@ -102,7 +105,10 @@ pub(super) fn collect(
 /// 文書全体の索引、または元の括弧から確定したリストの索引を保持する。
 pub(super) enum FunctionalOutline {
     Complete(Vec<MetaItem>),
-    Fragments(Vec<OriginalMetaList>),
+    Fragments {
+        lists: Vec<OriginalMetaList>,
+        provisional: Vec<ProvisionalMetaDeclaration>,
+    },
 }
 
 impl FunctionalOutline {
@@ -117,15 +123,26 @@ impl FunctionalOutline {
         encoding: PositionEncoding,
         hierarchical: bool,
     ) -> Option<DocumentSymbolResponse> {
-        let (complete, fragments): (Option<&[MetaItem]>, &[OriginalMetaList]) = match self {
-            Self::Complete(items) => (Some(items), &[]),
-            Self::Fragments(lists) => (None, lists),
-        };
-        let groups = complete.into_iter().map(|items| (0, items)).chain(
-            fragments
-                .iter()
-                .filter_map(|list| Some((list.span.start, list.index.as_ref().ok()?.as_slice()))),
-        );
+        let (complete, fragments, provisional): (Option<&[MetaItem]>, &[OriginalMetaList], &[_]) =
+            match self {
+                Self::Complete(items) => (Some(items), &[], &[]),
+                Self::Fragments { lists, provisional } => (None, lists, provisional),
+            };
+        // 所属未確定の表示を添えられるクライアントにだけ暫定宣言を返す。
+        let provisional = if hierarchical { provisional } else { &[] };
+        let groups = complete
+            .into_iter()
+            .map(|items| (0, items, false))
+            .chain(fragments.iter().filter_map(|list| {
+                Some((list.span.start, list.index.as_ref().ok()?.as_slice(), false))
+            }))
+            .chain(provisional.iter().map(|declaration| {
+                (
+                    declaration.span.start,
+                    std::slice::from_ref(&declaration.item),
+                    true,
+                )
+            }));
         collect_functional_groups(uri, text, groups, encoding, hierarchical)
     }
 }
@@ -134,7 +151,7 @@ impl FunctionalOutline {
 fn collect_functional_groups<'a>(
     uri: &Uri,
     text: &str,
-    groups: impl Iterator<Item = (usize, &'a [MetaItem])>,
+    groups: impl Iterator<Item = (usize, &'a [MetaItem], bool)>,
     encoding: PositionEncoding,
     hierarchical: bool,
 ) -> Option<DocumentSymbolResponse> {
@@ -144,7 +161,7 @@ fn collect_functional_groups<'a>(
     let mut flat = Vec::new();
     let mut root = Vec::<DocumentSymbol>::new();
     let mut namespaces = HashMap::<usize, usize>::new();
-    for (base, items) in groups {
+    for (base, items, provisional) in groups {
         let rebase = |span: &Range<usize>| (base + span.start)..(base + span.end);
         let range =
             |span: &Range<usize>| wire_range(&lines, text.as_bytes(), &rebase(span), encoding);
@@ -179,8 +196,12 @@ fn collect_functional_groups<'a>(
             };
             let symbol = DocumentSymbol {
                 name: name.into(),
-                detail: matches!(item.kind, MetaItemKind::Defmacro { .. })
-                    .then(|| "defmacro".to_owned()),
+                detail: if provisional {
+                    Some("所属未確定".to_owned())
+                } else {
+                    matches!(item.kind, MetaItemKind::Defmacro { .. })
+                        .then(|| "defmacro".to_owned())
+                },
                 kind,
                 tags: None,
                 deprecated: None,
