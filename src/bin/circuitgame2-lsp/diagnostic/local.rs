@@ -6,7 +6,7 @@ use circuitgame2_core::{
     editor::PositionEncoding,
     syntax::{
         OwnedRecoveryCache, SnapshotRecovery,
-        circuit::{CachedCircuitRecovery, CircuitRecovery},
+        circuit::{CachedCircuitRecovery, CircuitRecovery, relocate_circuit_span},
     },
 };
 use lsp_types::{Diagnostic, Uri};
@@ -27,39 +27,26 @@ impl LocalRecovery {
         edit: Range<usize>,
     ) -> Option<Self> {
         // 回路診断の採用条件が同じ場合に前後の診断を再利用する。
-        let CircuitRecovery::WithSyntaxRepairs {
-            recovered,
-            original,
-        } = old.recovery()
-        else {
+        let CircuitRecovery::WithSyntaxRepairs { original, .. } = old.recovery() else {
             return None;
         };
-        let lists = &recovered.original_lists;
-        let head_count = lists.partition_point(|span| span.end <= edit.start);
-        let start = lists[..head_count].last().map_or(0, |span| span.end);
-        let old_join = if edit.end == start {
-            start
-        } else {
-            lists
-                .get(lists.partition_point(|span| span.end < edit.end))?
-                .end
-        };
-        let first_tail = lists.partition_point(|span| span.start < old_join);
-        let cache =
-            OwnedRecoveryCache::remember(old.text().to_owned(), revision, start, old_join).ok()?;
-        let head = original[..head_count]
+        let window = old.recovery_reuse_window(edit)?;
+        let cache = OwnedRecoveryCache::remember(
+            old.text().to_owned(), revision, window.start, window.join,
+        ).ok()?;
+        let head = original[..window.head_count]
             .iter()
             .flatten()
             .flat_map(original_reports)
             .collect();
-        let tail = original[first_tail..]
+        let tail = original[window.first_tail..]
             .iter()
             .flatten()
             .flat_map(original_reports)
             .collect();
         Some(Self {
             cache,
-            old_join,
+            old_join: window.join,
             head,
             tail,
         })
@@ -103,16 +90,46 @@ impl LocalRecovery {
 
 impl Report {
     fn relocated(mut self, old_base: usize, new_base: usize) -> Option<Self> {
-        self.span = relocate(&self.span, old_base, new_base)?;
+        self.span = relocate_circuit_span(&self.span, old_base, new_base)?;
         if let Some((span, _)) = &mut self.related {
-            *span = relocate(span, old_base, new_base)?;
+            *span = relocate_circuit_span(span, old_base, new_base)?;
         }
         Some(self)
     }
 }
 
-fn relocate(span: &Range<usize>, old_base: usize, new_base: usize) -> Option<Range<usize>> {
-    let start = span.start.checked_sub(old_base)?.checked_add(new_base)?;
-    let end = span.end.checked_sub(old_base)?.checked_add(new_base)?;
-    Some(start..end)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reused_diagnostics_match_full_recovery_for_each_utf16_revision() {
+        let uri: Uri = "untitled:diagnostic-recovery.ncg2".parse().unwrap();
+        let prefix = "(using nor) (using) ";
+        let middle = "(using nor)";
+        let suffix = " ) (test demo (reset) (case))\r\n(using)\r\n(unfinished";
+        let old = CachedCircuitRecovery::analyze_with_build_index(format!("{prefix}{middle}{suffix}"));
+        let local = LocalRecovery::remember(&old, 1, prefix.len()..prefix.len() + middle.len())
+            .expect("変更箇所の前後に再利用できるリストがある");
+        let revised = [
+            "(using \"漢😀\")",
+            "  ; 前置き😀\r\n(using nor)",
+            "(using) (using nor)",
+        ];
+
+        for (index, middle) in revised.into_iter().enumerate() {
+            let source = format!("{prefix}{middle}{suffix}");
+            let from_local = local
+                .collect(&uri, &source, index as u64 + 2, PositionEncoding::Utf16)
+                .expect("局所再解析を適用できる");
+            let full = CachedCircuitRecovery::analyze_with_build_index(source);
+            let from_full = super::super::collect(&uri, &full, PositionEncoding::Utf16);
+            assert_eq!(from_local, from_full, "文書版 {}", index + 2);
+            assert!(
+                from_local
+                    .iter()
+                    .any(|diagnostic| diagnostic.related_information.is_some())
+            );
+        }
+    }
 }
