@@ -264,15 +264,7 @@ impl<'a> SourceSet<'a> {
         &self,
         disk: Option<&DiskSyntaxCache>,
     ) -> Result<CircuitProject<'_>, CircuitProjectError<'_>> {
-        let candidates: Vec<_> = self
-            .sources
-            .iter()
-            .map(|source| match &source.origin {
-                SourceOrigin::Disk(path) => disk?.candidate(path, &source.id),
-                SourceOrigin::Editor(_) => source.analysis,
-            })
-            .collect();
-        parse_circuit_project_with_cached_indexes(&self.snapshots(), &candidates)
+        parse_circuit_project_with_cached_indexes(&self.snapshots(), &self.syntax_candidates(disk))
     }
 
     /// 厳格解析に成功した閉文書のうち、登録する索引を用意する。
@@ -297,9 +289,20 @@ impl<'a> SourceSet<'a> {
         staged
     }
 
-    /// 開いている文書の回復結果を、ソーススナップショットと同じ順で返す。
-    pub(super) fn syntax_cache(&self) -> Vec<Option<&CachedCircuitRecovery>> {
-        self.sources.iter().map(|source| source.analysis).collect()
+    /// 開いている文書と閉じたファイルの解析候補を、スナップショットと同じ順で返す。
+    ///
+    /// 再利用できるかは、呼び出し先の Core が現在の本文との一致を検査して決める。
+    pub(super) fn syntax_candidates<'s>(
+        &'s self,
+        disk: Option<&'s DiskSyntaxCache>,
+    ) -> Vec<Option<&'s CachedCircuitRecovery>> {
+        self.sources
+            .iter()
+            .map(|source| match &source.origin {
+                SourceOrigin::Disk(path) => disk?.candidate(path, &source.id),
+                SourceOrigin::Editor(_) => source.analysis,
+            })
+            .collect()
     }
 
     /// 応答を公開する直前に、設定の選択とディスクから読んだ本文を照合する。

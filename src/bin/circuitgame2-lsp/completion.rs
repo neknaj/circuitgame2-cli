@@ -11,7 +11,7 @@ use circuitgame2_core::{
 };
 use lsp_types::{CompletionItem, CompletionItemKind, CompletionList, CompletionTextEdit, TextEdit};
 
-use super::sources::{OpenDocument, SourceSet};
+use super::sources::{DiskSyntaxCache, OpenDocument, SourceSet};
 
 /// 回復で確認できた断片の対象名に、同じ名前空間のモジュール候補を返す。
 ///
@@ -21,6 +21,7 @@ pub(super) fn collect<'a>(
     position: TextPosition,
     encoding: PositionEncoding,
     open: impl Iterator<Item = OpenDocument<'a>>,
+    disk: &DiskSyntaxCache,
 ) -> Option<CompletionList> {
     let text = current.text?;
     let offset = LineIndex::new(text).position_to_byte(position, encoding)?;
@@ -31,7 +32,8 @@ pub(super) fn collect<'a>(
     let file = source_list
         .iter()
         .position(|source| source.id.same_file(&path))?;
-    let project = inspect_circuit_project_with_cache(&source_list, &sources.syntax_cache());
+    let project =
+        inspect_circuit_project_with_cache(&source_list, &sources.syntax_candidates(Some(disk)));
     let result = project.module_part_candidates(file, offset)?;
     let target = sources.location(result.replace, encoding)?;
     if &target.uri != current.uri || target.range.start.line != target.range.end.line {
@@ -69,4 +71,64 @@ pub(super) fn collect<'a>(
             is_incomplete: true,
             items,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use url::Url;
+
+    use super::*;
+
+    #[test]
+    fn completion_uses_the_current_closed_source_after_a_same_size_edit() {
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main.ncg2");
+        let library = root.path().join("library.ncg2");
+        fs::write(
+            root.path().join("circuitgame2.toml"),
+            "sources = [\"library.ncg2\", \"main.ncg2\"]\n",
+        )
+        .unwrap();
+        let original = "(using nor) (module gate (in x) (out y))";
+        fs::write(&library, original).unwrap();
+        fs::write(&main, "").unwrap();
+        let uri = Url::from_file_path(&main)
+            .unwrap()
+            .as_str()
+            .parse()
+            .unwrap();
+        let current = OpenDocument {
+            uri: &uri,
+            text: Some("(module-part ga (def y x))"),
+            version: 1,
+            analysis: None,
+        };
+        let (_, source_set) = SourceSet::load(current, [current].into_iter()).unwrap();
+        let mut disk = DiskSyntaxCache::default();
+        assert!(source_set.parse_strict().is_ok());
+        disk.extend(source_set.stage_disk_indexes(&disk));
+        assert!(source_set.syntax_candidates(Some(&disk))[0].is_some());
+
+        let complete = || {
+            collect(
+                current,
+                TextPosition {
+                    line: 0,
+                    column: 15,
+                },
+                PositionEncoding::Utf16,
+                [current].into_iter(),
+                &disk,
+            )
+            .unwrap()
+            .items
+        };
+        assert_eq!(complete()[0].label, "gate");
+        fs::write(&library, original.replace("gate", "gait")).unwrap();
+        let items = complete();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "gait");
+    }
 }
