@@ -612,6 +612,7 @@ fn driver_bits_error(error: ClockedDriverBitsError) -> String {
     }
 }
 
+/// ビット選択の起点と、その型の出典を表示する。
 pub(crate) fn selection_input_type(
     input: &LocatedName<'_, '_>,
     actual: &SignalType<'_, '_>,
@@ -624,6 +625,7 @@ pub(crate) fn selection_input_type(
     )
 }
 
+/// 数値引数で見つかった違反を表示する。
 pub(crate) fn selection(error: SelectionArgumentError<'_, '_>) -> String {
     match error {
         SelectionArgumentError::NaturalOverflow { site, argument } => format!(
