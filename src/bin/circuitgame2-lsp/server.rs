@@ -10,14 +10,15 @@ use std::{
 use circuitgame2_core::editor::{LineIndex, PositionEncoding, TextPosition, apply_source_edit};
 use lsp_server::{ErrorCode, Message, Notification, Request, Response};
 use lsp_types::{
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams, InitializeParams,
-    InitializeResult, InlayHintParams, OneOf, PositionEncodingKind, PublishDiagnosticsParams,
-    ServerCapabilities, ServerInfo, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, Uri, VersionedTextDocumentIdentifier,
+    CompletionOptions, CompletionParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    GotoDefinitionParams, InitializeParams, InitializeResult, InlayHintParams, OneOf,
+    PositionEncodingKind, PublishDiagnosticsParams, ServerCapabilities, ServerInfo,
+    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, Uri, VersionedTextDocumentIdentifier,
 };
 
 use super::{
-    definition, diagnostic, inlay_hint,
+    completion, definition, diagnostic, inlay_hint,
     sources::{self, OpenDocument, ProjectKey, STANDALONE_ID, SourcePaths, SourceSet},
 };
 
@@ -96,6 +97,7 @@ impl Server {
                 self.state = State::Shutdown;
                 Response::new_ok(request.id, ())
             }
+            (State::Ready, "textDocument/completion") => self.completion(request),
             (State::Ready, "textDocument/definition") => self.definition(request),
             (State::Ready, "textDocument/inlayHint") => self.settling_hints(request),
             (State::Ready, method) if method != "initialize" => Response::new_err(
@@ -148,6 +150,7 @@ impl Server {
             InitializeResult {
                 capabilities: ServerCapabilities {
                     position_encoding: Some(wire_encoding),
+                    completion_provider: Some(CompletionOptions::default()),
                     definition_provider: Some(OneOf::Left(true)),
                     inlay_hint_provider: Some(OneOf::Left(true)),
                     text_document_sync: Some(TextDocumentSyncCapability::Options(
@@ -212,6 +215,40 @@ impl Server {
             None => Vec::new(),
         };
         Response::new_ok(request.id, hints)
+    }
+
+    fn completion(&self, request: Request) -> Response {
+        let params: CompletionParams = match serde_json::from_value(request.params) {
+            Ok(params) => params,
+            Err(error) => {
+                return Response::new_err(
+                    request.id,
+                    ErrorCode::InvalidParams as i32,
+                    error.to_string(),
+                );
+            }
+        };
+        let position = params.text_document_position;
+        let uri = &position.text_document.uri;
+        let position = match text_position(position.position) {
+            Ok(position) => position,
+            Err(error) => {
+                return Response::new_err(
+                    request.id,
+                    ErrorCode::InvalidParams as i32,
+                    error.into(),
+                );
+            }
+        };
+        let (Some(document), Some(encoding)) = (self.documents.get(uri), self.encoding) else {
+            return Response::new_ok(request.id, ());
+        };
+        let open = self
+            .documents
+            .iter()
+            .map(|(uri, doc)| doc.open_snapshot(uri));
+        let result = completion::collect(document.open_snapshot(uri), position, encoding, open);
+        Response::new_ok(request.id, result)
     }
 
     fn definition(&self, request: Request) -> Response {

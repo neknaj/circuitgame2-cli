@@ -339,6 +339,71 @@ fn inlay_hint_refreshes_when_an_open_dependency_changes() {
     assert_eq!(responses[at(5)]["result"][0]["label"], "定常化 ≤ 1 tick");
 }
 
+#[test]
+fn completion_replaces_the_original_module_part_name_after_a_syntax_error() {
+    let uri = "untitled:parts.ncg2";
+    let before_name = "\x22漢😀\x22 (module-part ";
+    let start = before_name.encode_utf16().count();
+    let end = start + 2;
+    let source = format!(
+        "(using nor)\n) (module gate (in x) (out y))\n(func garden (in x) (out y) (def y x))\n{before_name}ga (def y x))"
+    );
+    let query = |id, method, line, offset| {
+        request(
+            id,
+            method,
+            json!({"textDocument": {"uri": uri}, "position": {"line": line, "character": offset}}),
+        )
+    };
+    let responses = exchange([
+        request(1, "initialize", json!({"capabilities": {}})),
+        notification("initialized", json!({})),
+        notification(
+            "textDocument/didOpen",
+            json!({"textDocument": {
+                "uri": uri, "languageId": "ncg2", "version": 1, "text": source
+            }}),
+        ),
+        query(2, "textDocument/completion", 3, end),
+        query(3, "textDocument/definition", 3, start),
+        query(4, "textDocument/completion", 3, end + 2),
+        notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": "\x22(module-part ga"}]
+            }),
+        ),
+        query(5, "textDocument/completion", 0, 16),
+        request(6, "shutdown", Value::Null),
+        notification("exit", Value::Null),
+    ]);
+    let response = |id| {
+        &responses
+            .iter()
+            .find(|message| message["id"] == id)
+            .unwrap()["result"]
+    };
+    assert!(response(1)["capabilities"]["completionProvider"].is_object());
+    let list = response(2);
+    assert_eq!(list["isIncomplete"], true);
+    let items = list["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["label"], "gate");
+    assert!(items[0]["detail"].as_str().unwrap().contains("暫定"));
+    assert_eq!(
+        items[0]["textEdit"],
+        json!({
+            "newText": "gate", "range": {
+                "start": {"line": 3, "character": start}, "end": {"line": 3, "character": end}
+            }
+        })
+    );
+    assert!(response(3).is_null());
+    assert!(response(4).is_null());
+    assert!(response(5).is_null());
+}
+
 fn exchange(messages: impl IntoIterator<Item = Message>) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_circuitgame2-lsp"))
         .stdin(Stdio::piped())
