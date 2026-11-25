@@ -1,6 +1,7 @@
-//! UTF-8 の NCG2 ファイルを読み込み、回路を検査・評価・実行する。
+//! UTF-8 のソースを読み込んで静的に検査し、回路を評価・実行する。
 
 mod check_body;
+mod check_ncg2m;
 mod check_report;
 mod clocked;
 mod device_config;
@@ -59,6 +60,7 @@ run の既定の開始点は ::main。--input 一つにつき 1 tick 進める�
 run は reset 直後を tick 0 とし、各行に tick 番号と出力ビット列を表示する。\n\
 --vram を指定すると、指定順に各 VRAM の記憶部を追加する。\n\
 settle は固定入力での定常化を解析する。ネイティブ版では未推定・未証明の終了コードは 2。\n\
+check は .ncg2 の回路または .ncg2m の補助関数を静的に検査する。\n\
 nor-count は展開後の NOR ゲート数を完全修飾名ごとに表示する。\n\
 fmt は整形結果を標準出力に表示する。--check は整形が必要な場合に終了コード 1 を返す。\n\
 ネイティブ版の fmt --write は構文検査と整形が成功した場合にファイルを置き換える。\n\
@@ -409,7 +411,11 @@ fn command(args: &[String]) -> Result<Command<'_>, String> {
     }
 }
 
-fn source_path(path: &str, from_config: bool) -> Result<String, String> {
+fn source_path(
+    path: &str,
+    from_config: bool,
+    check_ncg2m: bool,
+) -> Result<(String, SourceKind), String> {
     if !from_config
         && Path::new(path)
             .components()
@@ -426,20 +432,21 @@ fn source_path(path: &str, from_config: bool) -> Result<String, String> {
     };
     let id = normalize_path(&path)
         .map_err(|error| format!("{path} のパスを正規化できない ({error:?})。"))?;
-    match id.source_kind() {
-        Some(SourceKind::Circuit) => {}
+    let kind = match id.source_kind() {
+        Some(kind @ SourceKind::Circuit) => kind,
+        Some(kind @ SourceKind::Functional) if check_ncg2m => kind,
         Some(SourceKind::Functional) if from_config => {
             return Err(format!(
                 "{path} は NCG2M のソース。この CLI は NCG2M の実行に未対応。"
             ));
         }
-        _ if from_config => {
+        _ if from_config || check_ncg2m => {
             return Err(format!(
                 "{path} の拡張子には .ncg2 または .ncg2m を指定する。"
             ));
         }
         _ => return Err(format!("{path} の拡張子には .ncg2 を指定する。")),
-    }
+    };
 
     // 正規化で Windows のドライブ指定が先頭に現れる場合も、相対パスとして扱わない。
     let normalized = id.components().join("/");
@@ -451,15 +458,15 @@ fn source_path(path: &str, from_config: bool) -> Result<String, String> {
             "{path} はプロジェクトルートからの相対パスで指定する。"
         ));
     }
-    Ok(normalized)
+    Ok((normalized, kind))
 }
 
 /// 正規化後のパスが同じソースは、最初の指定だけを読み込む。
 fn read_source(
-    sources: &mut Vec<(String, String)>,
+    sources: &mut Vec<(String, String, SourceKind)>,
     seen: &mut HashSet<String>,
     base: &Path,
-    path: String,
+    (path, kind): (String, SourceKind),
 ) -> Result<(), String> {
     if !seen.contains(&path) {
         let host_path = base.join(&path);
@@ -470,7 +477,7 @@ fn read_source(
             )
         })?;
         seen.insert(path.clone());
-        sources.push((path, text));
+        sources.push((path, text, kind));
     }
     Ok(())
 }
@@ -574,6 +581,7 @@ fn execute(
     };
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
+    let check_ncg2m = matches!(command, Command::Check { .. });
     let settings = match input {
         SourceInput::Files(files) => {
             for path in files {
@@ -581,7 +589,7 @@ fn execute(
                     &mut sources,
                     &mut seen,
                     Path::new(""),
-                    source_path(path, false)?,
+                    source_path(path, false, check_ncg2m)?,
                 )?;
             }
             None
@@ -608,7 +616,7 @@ fn execute(
             };
             let base = path.parent().unwrap_or(Path::new(""));
             for value in settings.sources.get_ref() {
-                let result = source_path(value.get_ref(), true)
+                let result = source_path(value.get_ref(), true, check_ncg2m)
                     .and_then(|source| read_source(&mut sources, &mut seen, base, source));
                 result.map_err(|error| {
                     if let Some(report) = &mut report {
@@ -622,7 +630,7 @@ fn execute(
     };
     let snapshots: Vec<_> = sources
         .iter()
-        .map(|(path, text)| SourceSnapshot {
+        .map(|(path, text, _)| SourceSnapshot {
             path,
             revision: 1,
             text,
@@ -632,6 +640,23 @@ fn execute(
         Some((path, _)) => config::source_diagnostic(path, &message),
         None => message,
     };
+    if check_ncg2m
+        && sources.iter().any(|(_, _, kind)| *kind == SourceKind::Functional)
+    {
+        let files = check_ncg2m::check(&snapshots, &mut report, &source_diagnostic)?;
+        if let Some((path, settings)) = &settings
+            && let Some(device) = settings.device.first()
+        {
+            let reason = "外部デバイスを検査するには、回路で開始モジュールを定義する必要がある。";
+            if let Some(report) = &mut report {
+                report.settings_error("device_requires_circuit", path, Some(device.span()));
+            }
+            return Err(config::at(path, Some(device.span()), reason));
+        }
+        return writeln!(stdout, "NCG2M の静的検査成功（{files} ファイル）")
+            .map_err(output_error)
+            .map(|()| ExitCode::SUCCESS);
+    }
     let project = parse_circuit_project(&snapshots).map_err(|error| {
         if let Some(report) = &mut report {
             report.project_error(&error);

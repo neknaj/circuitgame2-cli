@@ -1,0 +1,6 @@
+(namespace tools
+  (defn ready (as-type (Fn () Bool) (fn () true)))
+  (export ready))
+
+(use ::tools::ready ready)
+(defn startup-ready (as-type (Fn () Bool) (fn () (ready))))

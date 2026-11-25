@@ -15,6 +15,166 @@ fn cli(args: &[&str]) -> Output {
 }
 
 #[test]
+fn check_reads_ncg2m_directly_and_through_project_settings() {
+    let example = "examples/helpers.ncg2m";
+    let result = cli(&["check", example]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap(),
+        "NCG2M の静的検査成功（1 ファイル）\n"
+    );
+
+    let folder = tempfile::tempdir().unwrap();
+    fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(example),
+        folder.path().join("helpers.ncg2m"),
+    )
+    .unwrap();
+    let settings = folder.path().join("circuitgame2.toml");
+    fs::write(&settings, "sources = [\"helpers.ncg2m\"]\n").unwrap();
+    let path = settings.to_str().unwrap();
+    let result = cli(&["check", "--format", "json", "--project", path]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(result.stderr.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"version": 1, "ok": true, "project": path, "files": 1, "diagnostics": []})
+    );
+    let result = cli(&["run", "--project", path]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    assert!(
+        String::from_utf8(result.stderr)
+            .unwrap()
+            .contains("NCG2M の実行に未対応")
+    );
+}
+
+#[test]
+fn check_resolves_a_cross_language_use_before_reporting_the_unsupported_circuit_check() {
+    let folder = tempfile::tempdir().unwrap();
+    let dir = folder.path();
+    let settings = dir.join("circuitgame2.toml");
+    fs::write(&settings, "sources = [\"main.ncg2\", \"tools.ncg2m\"]\n").unwrap();
+    let circuit =
+        "; 🐈\n(using nor) (use ::tools::ready ready) (func gate (in a) (out y) (def y (nor a a)))";
+    fs::write(dir.join("main.ncg2"), circuit).unwrap();
+    let implementation = "; 🐈\n(namespace tools (defn ready (as-type (Fn () Bool) (fn () true)))";
+    let meta_path = dir.join("tools.ncg2m");
+    fs::write(&meta_path, format!("{implementation} (export ready))")).unwrap();
+    let args = [
+        "check",
+        "--format",
+        "json",
+        "--project",
+        settings.to_str().unwrap(),
+    ];
+    let result = cli(&args);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stderr.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(json["files"], 2);
+    assert_eq!(
+        json["diagnostics"][0]["code"],
+        "unsupported_mixed_circuit_check"
+    );
+    let gate = circuit.find("gate").unwrap();
+    assert_eq!(
+        json["diagnostics"][0]["location"],
+        serde_json::json!({"path":"main.ncg2","range":{"start":gate,"end":gate + "gate".len()}})
+    );
+
+    fs::write(meta_path, format!("{implementation})")).unwrap();
+    let result = cli(&args);
+    assert_eq!(result.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let diagnostic = &json["diagnostics"][0];
+    assert_eq!(diagnostic["code"], "private_use_target");
+    let absolute = circuit.find("::tools::ready").unwrap();
+    assert_eq!(
+        diagnostic["location"],
+        serde_json::json!({"path":"main.ncg2","range":{"start":absolute,"end":absolute + "::tools::ready".len()}})
+    );
+    let private = implementation.find("ready").unwrap();
+    assert_eq!(
+        diagnostic["related"][0],
+        serde_json::json!({"path":"tools.ncg2m","range":{"start":private,"end":private + "ready".len()}})
+    );
+}
+
+#[test]
+fn check_ncg2m_reports_original_ranges_for_unchecked_and_invalid_expressions() {
+    let folder = tempfile::tempdir().unwrap();
+    let dir = folder.path();
+    let settings = dir.join("circuitgame2.toml");
+    fs::write(&settings, "sources = [\"helpers.ncg2m\"]\n").unwrap();
+    let source = dir.join("helpers.ncg2m");
+    let args = [
+        "check",
+        "--format",
+        "json",
+        "--project",
+        settings.to_str().unwrap(),
+    ];
+    let examples = [
+        (
+            "; 🐈\n(defmacro saved () (quote value))",
+            ("(quote value)", "(quote value)"),
+            "unsupported_macro_body",
+            None,
+        ),
+        (
+            "; 🐈\n(defn answer (as-type (Fn () Nat) (fn () -1)))",
+            ("-1", "-1"),
+            "ncg2m_expression",
+            None,
+        ),
+        (
+            "; 🐈\n(defn unused (as-type (Fn () Bool) (fn () (let ((key true) (key false)) key))))",
+            ("key false", "key"),
+            "ncg2m_expression",
+            Some(("key true", "key")),
+        ),
+        (
+            "; 🐈\n(defn before (as-type (Fn () Bool) (fn () (after)))) (defn after (as-type (Fn () Bool) (fn () (before))))",
+            ("(after)", "(after)"),
+            "defn_cycle",
+            Some(("(before)", "(before)")),
+        ),
+    ];
+    for (text, primary, code, related) in examples {
+        fs::write(&source, text).unwrap();
+        let result = cli(&args);
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert!(result.stderr.is_empty());
+        let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(json["ok"], false);
+        let diagnostic = &json["diagnostics"][0];
+        assert_eq!(diagnostic["code"], code, "{json}");
+        let locations = [
+            (Some(primary), &diagnostic["location"]),
+            (related, &diagnostic["related"][0]),
+        ];
+        for (value, location) in locations {
+            if let Some((start_at, token)) = value {
+                let start = text.find(start_at).unwrap();
+                assert_eq!(
+                    *location,
+                    serde_json::json!({"path": "helpers.ncg2m", "range": {"start":start,"end":start + token.len()}}),
+                    "{json}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn nor_count_expands_named_routines_and_counts_only_nor_gates() {
     let source = "tests/fixtures/nor-count.ncg2";
     let result = cli(&["nor-count", source]);
