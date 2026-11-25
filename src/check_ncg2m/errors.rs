@@ -11,7 +11,7 @@ use circuitgame2_core::{
             FoldSyntaxError, LetSyntaxError,
         },
         file::MetaFileError,
-        integers::{IntegerLiteralError, IntegerType},
+        integers::{IntegerLiteralError, IntegerOperation, IntegerType},
     },
     project::{
         CircuitProjectError, DefnCallError, DefnCallGraphError, DefnNameError, FuncArityError,
@@ -320,12 +320,33 @@ pub(super) fn calls(
                 &format!("引数は {expected} 個必要だが、{found} 個ある。"),
                 [("補助関数の宣言", declaration.name)],
             ),
+            DefnBodyCallError::Call(DefnCallError::ArithmeticArity {
+                site: call,
+                operation,
+                found,
+            }) => failure(
+                report,
+                "argument_count",
+                site(call.source, call.span),
+                &format!(
+                    "組み込みの `{}` には引数が 2 個必要だが、{found} 個ある。",
+                    integer_operation_name(operation)
+                ),
+                [],
+            ),
         },
         DefnCallGraphError::UnvisitedCall(edge) => failure(
             report,
             "unchecked_defn_call",
             site(edge.call.source, edge.call.span),
             "補助関数の呼び出しの型検査を完了できない。",
+            [],
+        ),
+        DefnCallGraphError::UnvisitedArithmetic { site: call, .. } => failure(
+            report,
+            "unchecked_arithmetic",
+            site(call.source, call.span),
+            "整数演算の型検査を完了できない。",
             [],
         ),
         DefnCallGraphError::Cycle(edges) => {
@@ -485,6 +506,10 @@ fn expression_type(error: ExpressionTypeError<'_>) -> ExpressionDiagnostic {
             ),
         ),
         ExpressionTypeError::Integer { span, error } => (span, integer_literal_message(error)),
+        ExpressionTypeError::ArithmeticResult(span) => (
+            span,
+            "整数演算の結果は Nat または Int でなければならない。".into(),
+        ),
     };
     (span, message, None)
 }
@@ -501,10 +526,18 @@ pub(super) fn integer_literal_message(error: IntegerLiteralError) -> String {
     }
 }
 
-fn integer_type(ty: IntegerType) -> &'static str {
+pub(super) fn integer_type(ty: IntegerType) -> &'static str {
     match ty {
         IntegerType::Nat => "Nat",
         IntegerType::Int => "Int",
+    }
+}
+
+pub(super) fn integer_operation_name(operation: IntegerOperation) -> &'static str {
+    match operation {
+        IntegerOperation::Add => "add",
+        IntegerOperation::Sub => "sub",
+        IntegerOperation::Mul => "mul",
     }
 }
 

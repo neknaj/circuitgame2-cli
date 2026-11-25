@@ -120,6 +120,67 @@ fn eval_meta_selects_a_checked_helper_and_respects_the_fuel_budget() {
 }
 
 #[test]
+fn eval_meta_reports_integer_arithmetic_at_the_original_helper() {
+    let folder = tempfile::tempdir().unwrap();
+    let dir = folder.path();
+    let settings = dir.join("circuitgame2.toml");
+    fs::write(&settings, "sources = [\"main.ncg2m\", \"helper.ncg2m\"]\n").unwrap();
+    fs::write(
+        dir.join("main.ncg2m"),
+        "(use ::math::step transform) (defn entry (as-type (Fn (Nat) Nat) (fn (x) (transform x))))",
+    )
+    .unwrap();
+    let helper_path = dir.join("helper.ncg2m");
+    let helper = "(namespace math (export step) (defn step (as-type (Fn (Nat) Nat) (fn (x) (mul (sub x 1) 2)))))";
+    fs::write(&helper_path, helper).unwrap();
+    let project = settings.to_str().unwrap();
+    let evaluate = |value| {
+        cli(&[
+            "eval-meta",
+            "--defn",
+            "::entry",
+            "--arg",
+            value,
+            "--fuel",
+            "100",
+            "--project",
+            project,
+        ])
+    };
+    let success = evaluate("Nat:9");
+    assert!(success.status.success(), "{success:?}");
+    assert_eq!(success.stdout, b"16\n");
+    assert!(success.stderr.is_empty());
+
+    let expression = "(sub x 1)";
+    let start = helper.find(expression).unwrap();
+    let failed = evaluate("Nat:0");
+    assert_eq!(failed.status.code(), Some(1), "{failed:?}");
+    assert!(failed.stdout.is_empty());
+    let message = String::from_utf8(failed.stderr).unwrap();
+    assert!(message.contains(&format!(
+        "helper.ncg2m [{start}..{}]",
+        start + expression.len()
+    )));
+    assert!(message.contains("`sub` の計算結果は Nat の範囲外"));
+
+    let incomplete = "(sub x)";
+    fs::write(&helper_path, helper.replace(expression, incomplete)).unwrap();
+    let failed = cli(&["check", "--format", "json", "--project", project]);
+    assert_eq!(failed.status.code(), Some(1), "{failed:?}");
+    let report: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+    let diagnostic = &report["diagnostics"][0];
+    assert_eq!(diagnostic["code"], "argument_count");
+    assert_eq!(
+        diagnostic["location"],
+        serde_json::json!({
+            "path": "helper.ncg2m",
+            "range": {"start": start, "end": start + incomplete.len()},
+        })
+    );
+}
+
+#[test]
 fn check_resolves_a_cross_language_use_before_reporting_the_unsupported_circuit_check() {
     let folder = tempfile::tempdir().unwrap();
     let dir = folder.path();

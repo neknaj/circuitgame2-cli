@@ -215,6 +215,16 @@ fn execution_error(error: ScalarExecutionError<'_, '_>) -> String {
             diagnostic::located(&site(error.source, error.span)),
             errors::integer_literal_message(error.error)
         ),
+        ScalarExecutionError::Arithmetic {
+            source,
+            operation,
+            error,
+        } => format!(
+            "{} `{}` の計算結果は {} の範囲外。",
+            diagnostic::located(&site(source, error.span)),
+            errors::integer_operation_name(operation),
+            errors::integer_type(error.ty)
+        ),
         ScalarExecutionError::Deferred { source, span } => format!(
             "{} スカラー評価の対象外の式や型がある。",
             diagnostic::located(&site(source, span))
