@@ -17,8 +17,8 @@ name = "circuitgame2-lsp"
 path = "src/bin/circuitgame2-lsp/main.rs"
 
 [dependencies]
-circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "d8cffa999c347be30997b8ceb7da894470e9335d" }
-circuitgame2-project-config = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "d8cffa999c347be30997b8ceb7da894470e9335d" }
+circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "0a23a92e74b680375525cf69fe3d94cd45ff4069" }
+circuitgame2-project-config = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "0a23a92e74b680375525cf69fe3d94cd45ff4069" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
