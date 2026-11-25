@@ -166,6 +166,14 @@ ncg2 run --project examples/vram/circuitgame2.toml --vram screen --input 1101 --
 
 `--vram` を複数指定した場合は、指定順に列を追加する。公開名が `-` で始まる場合は `--vram=-screen` の形で指定する。`run --project` は `--vram` を省いた場合も、設定された読み出し信号を検査する。
 
+## RP 向けの GPIO 配線表を作る
+
+```sh
+ncg2 rp-plan --project circuitgame2.toml --board board.toml
+```
+
+Pico または Pico 2 向けに回路と GPIO の割り当てを検査し、ファームウェアのビルドに渡す配線表を標準出力へ書く。対象は単一ビットの入出力を持つ順序 NOR 回路。ルート回路の各入力には GPIO の接続を指定し、`tick-ns` は正の整数マイクロ秒で表す。 [設定とビルドの例](https://github.com/neknaj/circuitgame2/tree/main/examples/rp-gpio)
+
 ## 定常化を調べる
 
 入力を固定したときの定常化までの上界を `settle` で求める。同じ回路を CI で確認するときは、上限の tick 数を `--within` で指定する。
