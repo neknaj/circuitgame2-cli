@@ -54,16 +54,46 @@ pub fn read_settings(path: &Path) -> Result<ProjectConfig, String> {
 ///
 /// 読み取りや検査に失敗した場合は診断を返す。設定中の違反には位置も付ける。
 pub fn read_settings_snapshot(path: &Path) -> Result<(ProjectConfig, Vec<u8>), String> {
-    let bytes = fs::read(path)
-        .map_err(|error| at(path, None, &format!("設定を読み込めない ({error})。")))?;
+    read_settings_located(path).map_err(|error| at(path, error.span, &error.reason))
+}
+
+/// 設定を読み込めない理由と、対象箇所が分かる場合のファイル内の範囲。
+pub struct SettingsDiagnostic {
+    /// 診断を機械処理するための識別子。
+    pub code: &'static str,
+    /// 設定ファイルの半開バイト範囲。
+    pub span: Option<Range<usize>>,
+    /// 設定ファイル名と範囲を除いたメッセージ。
+    pub reason: String,
+}
+
+/// 設定と解析に使った内容を読み、診断の範囲を別に返す。
+///
+/// # Errors
+///
+/// ファイルの読み込み、UTF-8 と TOML の解析、空のソース一覧の順に失敗を報告する。
+pub fn read_settings_located(path: &Path) -> Result<(ProjectConfig, Vec<u8>), SettingsDiagnostic> {
+    let bytes = fs::read(path).map_err(|error| SettingsDiagnostic {
+        code: "settings_read",
+        span: None,
+        reason: format!("設定を読み込めない ({error})。"),
+    })?;
     let config = parse(&bytes).map_err(|error| match error {
-        ConfigError::InvalidUtf8(span) => at(path, Some(span), "設定に不正な UTF-8 が含まれる。"),
-        ConfigError::InvalidToml { span, reason } => {
-            at(path, span, &format!("設定を解釈できない。{reason}"))
-        }
-        ConfigError::EmptySources(span) => {
-            at(path, Some(span), "sources にソースを1件以上指定する。")
-        }
+        ConfigError::InvalidUtf8(span) => SettingsDiagnostic {
+            code: "settings_utf8",
+            span: Some(span),
+            reason: "設定に不正な UTF-8 が含まれる。".into(),
+        },
+        ConfigError::InvalidToml { span, reason } => SettingsDiagnostic {
+            code: "settings_toml",
+            span,
+            reason: format!("設定を解釈できない。{reason}"),
+        },
+        ConfigError::EmptySources(span) => SettingsDiagnostic {
+            code: "settings_empty_sources",
+            span: Some(span),
+            reason: "sources にソースを1件以上指定する。".into(),
+        },
     })?;
     Ok((config, bytes))
 }

@@ -178,6 +178,17 @@ fn project_settings_errors_have_utf8_byte_ranges() {
     assert!(error.contains(&format!("{path}[15..16]")), "{error}");
     assert!(error.contains("不正な UTF-8"), "{error}");
 
+    let machine = cli(&["check", "--format", "json", "--project", path]);
+    assert_eq!(machine.status.code(), Some(1));
+    assert!(machine.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(report["diagnostics"][0]["code"], "settings_utf8");
+    assert_eq!(report["diagnostics"][0]["location"]["path"], path);
+    assert_eq!(
+        report["diagnostics"][0]["location"]["range"],
+        serde_json::json!({"start": 15, "end": 16}),
+    );
+
     for (source, expected) in [
         ("sources = [\"main.ncg2\"]\nunknown = true\n", "unknown"),
         (
@@ -421,16 +432,104 @@ fn namespace_selection_and_diagnostics_preserve_file_boundaries() {
     assert!(stderr.contains("invalid.ncg2 ["));
     assert!(stderr.contains("UnclosedList"));
 
+    let machine = run(&["check", "--format", "json", "invalid.ncg2"]);
+    assert_eq!(machine.status.code(), Some(1));
+    assert!(machine.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["diagnostics"][0]["code"], "syntax");
+    assert_eq!(report["diagnostics"][0]["location"]["path"], "invalid.ncg2");
+
     fs::write(
         folder.0.join("invalid.ncg2"),
         "(using nor) (func broken (in x) (out y) (def y (unknown x)))",
     )
     .unwrap();
+    let machine = run(&["check", "--format=json", "invalid.ncg2"]);
+    assert_eq!(machine.status.code(), Some(1));
+    assert!(machine.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(report["files"], 1);
+    assert_eq!(report["diagnostics"][0]["code"], "missing_reference");
+    let dump = run(&["dump", "invalid.ncg2"]);
+    assert!(dump.status.success());
+    let dump: serde_json::Value = serde_json::from_slice(&dump.stdout).unwrap();
+    assert_eq!(dump["version"], 1);
+    let source = &dump["sources"][0];
+    assert_eq!(source["symbols"][0]["name"], "broken");
+    let reference = &source["references"][0];
+    let form = reference["form"].as_u64().unwrap() as usize;
+    assert_eq!(source["forms"][form]["text"], "unknown");
+    assert_eq!(
+        reference["range"],
+        report["diagnostics"][0]["location"]["range"]
+    );
+
     let missing = run(&["check", "invalid.ncg2"]);
     assert_eq!(missing.status.code(), Some(1));
     let stderr = String::from_utf8(missing.stderr).unwrap();
     assert!(stderr.contains("invalid.ncg2 ["));
     assert!(stderr.contains("unknown が見つからない"));
+
+    let wrong_type = "; 日本語のコメント\n(using nor)\n(func bad (in (wide (bits 3))) (out (target (bits 2))) (def target wide))";
+    fs::write(folder.0.join("wrong-type.ncg2"), wrong_type).unwrap();
+    let plain = run(&["check", "wrong-type.ncg2"]);
+    assert_eq!(plain.status.code(), Some(1));
+    assert!(
+        String::from_utf8(plain.stderr)
+            .unwrap()
+            .contains("駆動元の型")
+    );
+    let machine = run(&["check", "--format", "json", "wrong-type.ncg2"]);
+    assert_eq!(machine.status.code(), Some(1));
+    assert!(machine.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    let error = &report["diagnostics"][0];
+    let start = wrong_type.rfind("wide").unwrap();
+    assert_eq!(error["code"], "output_type_mismatch");
+    assert_eq!(error["location"]["path"], "wrong-type.ncg2");
+    assert_eq!(
+        error["location"]["range"],
+        serde_json::json!({"start": start, "end": start + 4})
+    );
+    assert_eq!(error["related"].as_array().unwrap().len(), 2);
+
+    let expansion = "(using nor) (func pending (in) (out y) (expand make))";
+    fs::write(folder.0.join("pending.ncg2"), expansion).unwrap();
+    let machine = run(&["check", "--format", "json", "pending.ncg2"]);
+    assert_eq!(machine.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    let error = &report["diagnostics"][0];
+    let call = "(expand make)";
+    let start = expansion.find(call).unwrap();
+    assert_eq!(error["code"], "needs_expansion");
+    assert_eq!(
+        error["location"]["range"],
+        serde_json::json!({"start": start, "end": start + call.len()})
+    );
+
+    let left = "(using nor) (func left (in x) (out y) (def y (right x)))";
+    let right = "(func right (in x) (out y) (def y (left x)))";
+    fs::write(folder.0.join("left.ncg2"), left).unwrap();
+    fs::write(folder.0.join("right.ncg2"), right).unwrap();
+    let machine = run(&["check", "--format", "json", "left.ncg2", "right.ncg2"]);
+    assert_eq!(machine.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    let error = &report["diagnostics"][0];
+    assert_eq!(error["code"], "function_cycle");
+    let mut edges = [&error["location"], &error["related"][0]];
+    edges.sort_by_key(|edge| edge["path"].as_str().unwrap());
+    for (edge, path, source, target) in [
+        (edges[0], "left.ncg2", left, "right"),
+        (edges[1], "right.ncg2", right, "left"),
+    ] {
+        let start = source.find(target).unwrap();
+        assert_eq!(edge["path"], path);
+        assert_eq!(
+            edge["range"],
+            serde_json::json!({"start": start, "end": start + target.len()})
+        );
+    }
 }
 
 #[test]

@@ -201,6 +201,7 @@ pub(super) fn reference_reason(
 pub(super) fn analysis_error(
     error: DefinitionAnalysisError<'_, '_>,
     contextualize: impl Fn(String) -> String,
+    print_warnings: bool,
 ) -> String {
     match error {
         DefinitionAnalysisError::Basis(CircuitBasisError::Missing) => {
@@ -213,7 +214,9 @@ pub(super) fn analysis_error(
         ),
         DefinitionAnalysisError::Alias(conflict) => alias_error(conflict),
         DefinitionAnalysisError::Definition { error, aliases } => {
-            alias_warnings(&aliases, contextualize);
+            if print_warnings {
+                alias_warnings(&aliases, contextualize);
+            }
             reference_error(error)
         }
         DefinitionAnalysisError::UseTarget(error) => match error {
@@ -241,21 +244,24 @@ pub(super) fn analysis_error(
     }
 }
 
-pub(super) fn expansion_error(
-    project: &CircuitProject<'_>,
-    error: ExpandFunctionsError<'_, '_>,
-) -> String {
+pub(super) fn function_expansion_error(error: FunctionExpansionError<'_, '_>) -> String {
     match error {
-        ExpandFunctionsError::Plan(FunctionExpansionError::Reference(error)) => {
-            reference_error(error)
-        }
-        ExpandFunctionsError::Plan(FunctionExpansionError::Cycle(sites)) => {
+        FunctionExpansionError::Reference(error) => reference_error(error),
+        FunctionExpansionError::Cycle(sites) => {
             let mut message = "func の呼び出しが循環している。".to_owned();
             for site in sites {
                 message.push_str(&format!("\n  {}", located(&site.location)));
             }
             message
         }
+    }
+}
+pub(super) fn expansion_error(
+    project: &CircuitProject<'_>,
+    error: ExpandFunctionsError<'_, '_>,
+) -> String {
+    match error {
+        ExpandFunctionsError::Plan(error) => function_expansion_error(error),
         ExpandFunctionsError::Function {
             position: (file, entry),
             diagnostic,
