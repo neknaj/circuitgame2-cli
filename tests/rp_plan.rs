@@ -37,19 +37,17 @@ port = "x"
 pin = 5
 "#;
 
-fn plan(directory: &Path, project: &str, board: &str) -> Output {
-    fs::write(
-        directory.join("main.ncg2"),
-        "
+const CIRCUIT: &str = "
 (using nor)
 (module main
   (in a b)
   (out x y)
   (def x (nor a a))
   (def y (nor x b)))
-",
-    )
-    .unwrap();
+";
+
+fn plan(directory: &Path, circuit: &str, project: &str, board: &str) -> Output {
+    fs::write(directory.join("main.ncg2"), circuit).unwrap();
     fs::write(directory.join("circuitgame2.toml"), project).unwrap();
     fs::write(directory.join("board.toml"), board).unwrap();
     Command::new(env!("CARGO_BIN_EXE_ncg2"))
@@ -68,7 +66,7 @@ fn plan(directory: &Path, project: &str, board: &str) -> Output {
 #[test]
 fn exports_declared_port_order_and_output_fanout() {
     let directory = tempdir().unwrap();
-    let output = plan(directory.path(), PROJECT, BOARD);
+    let output = plan(directory.path(), CIRCUIT, PROJECT, BOARD);
     assert!(
         output.status.success(),
         "{}",
@@ -95,7 +93,7 @@ fn invalid_period_and_pin_conflict_leave_stdout_empty() {
         ),
     ];
     for (project, board, location, reason) in cases {
-        let output = plan(directory.path(), &project, &board);
+        let output = plan(directory.path(), CIRCUIT, &project, &board);
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         let error = String::from_utf8(output.stderr).unwrap();
@@ -107,4 +105,79 @@ fn invalid_period_and_pin_conflict_leave_stdout_empty() {
             assert_eq!(error.matches(location).count(), 2);
         }
     }
+}
+
+const UART_CIRCUIT: &str = r#"(using nor)
+(module main
+  (in r7 r6 r5 r4 r3 r2 r1 r0 received framing overrun ready sent ok button)
+  (out button ready r0 r1 r2 r3 r4 r5 r6 r7 received ok))
+"#;
+
+const UART_BOARD: &str = r#"board = "pico"
+[[gpio]]
+direction = "input"
+port = "button"
+pin = 2
+
+[[gpio]]
+direction = "output"
+port = "button"
+pin = 3
+
+[uart]
+instance = 0
+tx-pin = 0
+rx-pin = 1
+baud = 115200
+rx-data = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"]
+rx-valid = "received"
+rx-framing = "framing"
+rx-overrun = "overrun"
+rx-ready = "ready"
+tx-data = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"]
+tx-valid = "received"
+tx-ready = "ready"
+tx-done = "sent"
+tx-ok = "ok"
+tx-done-ready = "ok"
+"#;
+
+#[test]
+fn exports_uart_and_gpio_in_declared_input_order() {
+    let directory = tempdir().unwrap();
+    let output = plan(directory.path(), UART_CIRCUIT, PROJECT, UART_BOARD);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let table = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<_> = table.lines().collect();
+    assert_eq!(
+        &lines[..5],
+        &[
+            "ncg2-rp-uart-v1",
+            "board pico",
+            "period-us 2000",
+            "uart 0 0 1 115200",
+            "uart-outputs 1 2 3 4 5 6 7 8 9 10 11",
+        ]
+    );
+    assert_eq!(lines[5], "input-uart rx-data 7");
+    assert_eq!(lines[12], "input-uart rx-data 0");
+    assert_eq!(lines[19], "input 2");
+    assert_eq!(lines[20], "port 14");
+    assert_eq!(lines.last().copied(), Some("output 0 3 0"));
+}
+
+#[test]
+fn rejects_shared_gpio_and_uart_driver_before_writing() {
+    let directory = tempdir().unwrap();
+    let board = UART_BOARD.replacen("port = \"button\"", "port = \"r0\"", 1);
+    let output = plan(directory.path(), UART_CIRCUIT, PROJECT, &board);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("同じ回路入力"), "{error}");
+    assert_eq!(error.matches("board.toml[").count(), 2);
 }

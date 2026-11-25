@@ -5,7 +5,11 @@ use std::{fs, io::Write, ops::Range, path::Path};
 use circuitgame2_cli::config::{self, ProjectConfig};
 use circuitgame2_core::time::exact_microseconds;
 use circuitgame2_core::{
-    backend::rp::{AssignmentError, Board, GpioBinding, GpioCircuitImage, GpioImageError},
+    backend::rp::{
+        AssignmentError, Board, GpioBinding, GpioCircuitImage, GpioImageError, GpioOutputPin,
+        RpInputSource, UartCircuitImage, UartImageError, UartInputSignal, UartPortNames, UartSetup,
+    },
+    netlist::PackedNorLayout32,
     project::{
         CircuitProject, ClockedModuleVmError, DeviceBindingsError, DevicePortBindingError,
         ModuleBodyPosition, UseAliases,
@@ -70,11 +74,59 @@ impl Gpio {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct Uart {
+    instance: u8,
+    tx_pin: u8,
+    rx_pin: u8,
+    baud: u32,
+    rx_data: [String; 8],
+    rx_valid: String,
+    rx_framing: String,
+    rx_overrun: String,
+    rx_ready: String,
+    tx_data: [String; 8],
+    tx_valid: String,
+    tx_ready: String,
+    tx_done: String,
+    tx_ok: String,
+    tx_done_ready: String,
+}
+
+impl Uart {
+    fn setup(&self) -> UartSetup {
+        UartSetup {
+            instance: self.instance,
+            tx: self.tx_pin,
+            rx: self.rx_pin,
+            baud: self.baud,
+        }
+    }
+
+    fn names(&self) -> UartPortNames<'_> {
+        UartPortNames {
+            rx_data: self.rx_data.each_ref().map(String::as_str),
+            rx_valid: &self.rx_valid,
+            rx_framing: &self.rx_framing,
+            rx_overrun: &self.rx_overrun,
+            rx_ready: &self.rx_ready,
+            tx_data: self.tx_data.each_ref().map(String::as_str),
+            tx_valid: &self.tx_valid,
+            tx_ready: &self.tx_ready,
+            tx_done: &self.tx_done,
+            tx_ok: &self.tx_ok,
+            tx_done_ready: &self.tx_done_ready,
+        }
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Wiring {
     board: BoardKind,
     #[serde(default)]
     gpio: Vec<Spanned<Gpio>>,
+    uart: Option<Spanned<Uart>>,
 }
 
 fn read_board(path: &Path) -> Result<Wiring, String> {
@@ -114,7 +166,11 @@ fn period_micros(project: &Path, settings: &ProjectConfig) -> Result<u64, String
 }
 
 fn span(wiring: &Wiring, at: usize) -> Option<Range<usize>> {
-    wiring.gpio.get(at).map(Spanned::span)
+    wiring
+        .gpio
+        .get(at)
+        .map(Spanned::span)
+        .or_else(|| wiring.uart.as_ref().map(Spanned::span))
 }
 
 fn image_error(
@@ -138,9 +194,11 @@ fn image_error(
             site.assignment,
             &format!("GP{pin} はボードの外部端子に出ていない。"),
         ),
-        GpioImageError::Pin(_) => {
-            config::at(board, None, "GPIO 接続でボードの制約に違反している。")
-        }
+        GpioImageError::Pin(_) => config::at(
+            board,
+            wiring.uart.as_ref().map(Spanned::span),
+            "ボードのピンまたは周辺機能の割り当てに違反している。",
+        ),
         GpioImageError::Binding(DeviceBindingsError::DuplicateDriver { first, later }) => format!(
             "{}\n{}",
             at(later, "同じ回路入力を複数の接続が駆動している。"),
@@ -158,7 +216,7 @@ fn image_error(
             ),
             DevicePortBindingError::TypeMismatch { actual, .. } => format!(
                 "{}\n{}",
-                at(request, "GPIO は単一ビットの回路ポートに接続する。"),
+                at(request, "RP の接続先には単一ビットの回路ポートを指定する。"),
                 config::source_diagnostic(
                     source.settings_path,
                     &format!(
@@ -175,7 +233,11 @@ fn image_error(
         GpioImageError::MissingInput { port } => config::at(
             board,
             None,
-            &format!("回路入力 {} に GPIO の接続が必要。", port + 1),
+            &if wiring.uart.is_some() {
+                format!("回路入力 {} に GPIO または UART の接続が必要。", port + 1)
+            } else {
+                format!("回路入力 {} に GPIO の接続が必要。", port + 1)
+            },
         ),
         GpioImageError::Circuit(error) => config::source_diagnostic(
             source.settings_path,
@@ -229,6 +291,29 @@ pub(super) fn export(
         .iter()
         .map(|row| row.get_ref().binding())
         .collect();
+    if let Some(uart) = &wiring.uart {
+        let image = aliases
+            .build_rp_uart_image(
+                source.owner,
+                wiring.board.native(),
+                &bindings,
+                uart.get_ref().setup(),
+                uart.get_ref().names(),
+                period,
+                super::WIDTH_LIMIT,
+                super::BIT_LIMIT,
+                super::GATE_LIMIT,
+            )
+            .map_err(|error| match error {
+                UartImageError::ZeroBaud => config::at(
+                    board,
+                    Some(uart.span()),
+                    "UART のボーレートは0より大きい必要がある。",
+                ),
+                UartImageError::Circuit(cause) => image_error(cause, board, &wiring, &source),
+            })?;
+        return write_uart_plan(stdout, wiring.board, &image).map_err(super::output_error);
+    }
     let image = aliases
         .build_rp_gpio_image(
             source.owner,
@@ -248,20 +333,70 @@ fn write_plan(
     board: BoardKind,
     image: &GpioCircuitImage,
 ) -> std::io::Result<()> {
-    let layout = image.layout();
     writeln!(stdout, "ncg2-rp-gpio-v1")?;
     writeln!(stdout, "board {}", board.wire_name())?;
     writeln!(stdout, "period-us {}", image.tick_micros())?;
     for pin in image.input_pins() {
         writeln!(stdout, "input {pin}")?;
     }
+    write_layout(stdout, image.layout(), image.output_pins())
+}
+
+fn write_uart_plan(
+    out: &mut impl Write,
+    board: BoardKind,
+    image: &UartCircuitImage,
+) -> std::io::Result<()> {
+    writeln!(out, "ncg2-rp-uart-v1")?;
+    writeln!(out, "board {}", board.wire_name())?;
+    writeln!(out, "period-us {}", image.tick_micros())?;
+    let uart = image.uart();
+    writeln!(
+        out,
+        "uart {} {} {} {}",
+        uart.instance, uart.tx, uart.rx, uart.baud
+    )?;
+    let ports = image.uart_outputs();
+    write!(out, "uart-outputs {}", ports.rx_ready)?;
+    for bit in ports.tx_data {
+        write!(out, " {bit}")?;
+    }
+    writeln!(out, " {} {}", ports.tx_valid, ports.tx_done_ready)?;
+    for source in image.inputs() {
+        match *source {
+            RpInputSource::Gpio(pin) => writeln!(out, "input {pin}")?,
+            RpInputSource::Uart(UartInputSignal::RxBit(bit)) => {
+                writeln!(out, "input-uart rx-data {bit}")?
+            }
+            RpInputSource::Uart(signal) => {
+                let name = match signal {
+                    UartInputSignal::RxValid => "rx-valid",
+                    UartInputSignal::RxFraming => "rx-framing",
+                    UartInputSignal::RxOverrun => "rx-overrun",
+                    UartInputSignal::TxReady => "tx-ready",
+                    UartInputSignal::TxDone => "tx-done",
+                    UartInputSignal::TxOk => "tx-ok",
+                    UartInputSignal::RxBit(_) => unreachable!(),
+                };
+                writeln!(out, "input-uart {name}")?;
+            }
+        }
+    }
+    write_layout(out, image.layout(), image.gpio_outputs())
+}
+
+fn write_layout(
+    stdout: &mut impl Write,
+    layout: &PackedNorLayout32,
+    outputs: &[GpioOutputPin],
+) -> std::io::Result<()> {
     for gate in layout.gates() {
         writeln!(stdout, "gate {} {}", gate.left, gate.right)?;
     }
     for port in layout.outputs() {
         writeln!(stdout, "port {port}")?;
     }
-    for output in image.output_pins() {
+    for output in outputs {
         writeln!(
             stdout,
             "output {} {} {}",
