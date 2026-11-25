@@ -13,9 +13,15 @@ pub(super) use circuitgame2_cli::CLOCKED_LIMITS as LIMITS;
 /// 実行するモジュール、入力列、出力に加える VRAM の指定。
 pub(super) struct TraceOptions<'a> {
     pub(super) name: &'a str,
-    pub(super) frames: &'a [&'a str],
+    pub(super) frames: InputFrames<'a>,
     pub(super) vram: &'a [&'a str],
     pub(super) settings: Option<(&'a Path, &'a config::ProjectConfig)>,
+}
+
+/// tick ごとに与える入力。空入力を繰り返す場合は回数だけを保持する。
+pub(super) enum InputFrames<'a> {
+    Explicit(Vec<&'a str>),
+    EmptyTicks(u64),
 }
 
 /// reset と各 tick の出力を、tick 番号とビット列の組で一行ずつ書く。
@@ -72,7 +78,18 @@ pub(super) fn trace(
         .ok_or_else(|| format!("{name} のモジュールを実行できない。"))?;
 
     let width = compiled.inputs().total_bits();
-    for (index, frame) in frames.iter().enumerate() {
+    let (explicit, empty_ticks) = match &frames {
+        InputFrames::Explicit(frames) => (frames.as_slice(), 0),
+        InputFrames::EmptyTicks(ticks) => {
+            if !compiled.inputs().ranges().is_empty() {
+                return Err(format!(
+                    "--ticks は入力ポートがない回路に使える。{name} には {width} ビットの入力が必要。"
+                ));
+            }
+            (&[][..], *ticks)
+        }
+    };
+    for (index, frame) in explicit.iter().enumerate() {
         validate_input(frame, width)
             .map_err(|reason| format!("tick {} の入力。{reason}", index + 1))?;
     }
@@ -84,8 +101,8 @@ pub(super) fn trace(
     }
     let output = compiled.reset();
     write_frame(stdout, &compiled, vram, 0, output)?;
-    for (index, frame) in frames.iter().enumerate() {
-        let tick = index + 1;
+    let frames = explicit.iter().copied().chain((0..empty_ticks).map(|_| ""));
+    for (tick, frame) in (1..=u64::MAX).zip(frames) {
         let output = compiled
             .step(&input_bits(frame))
             .map_err(|error| format!("{name} の tick {tick} を実行できない ({error:?})。"))?;
@@ -99,7 +116,7 @@ fn write_frame(
     stdout: &mut impl Write,
     compiled: &ClockedVramVm<'_, '_, '_>,
     vram: &[&str],
-    tick: usize,
+    tick: u64,
     output: Vec<bool>,
 ) -> Result<(), String> {
     let mut line = format!("{tick} {}", format_bits(output));

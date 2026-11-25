@@ -560,6 +560,56 @@ fn run_accepts_empty_frames_for_an_entry_without_inputs() {
 }
 
 #[test]
+fn run_advances_an_input_free_entry_for_the_requested_ticks() {
+    for (options, expected) in [
+        (&["--ticks", "3"][..], "0 0\n1 1\n2 0\n3 1\n"),
+        (&["--ticks=2"][..], "0 0\n1 1\n2 0\n"),
+        (&["--ticks", "0"][..], "0 0\n"),
+    ] {
+        let mut args = vec!["run", "--entry", "::tests::oscillator"];
+        args.extend_from_slice(options);
+        args.push("tests/fixtures/clocked.ncg2");
+        let trace = cli(&args);
+        assert!(
+            trace.status.success(),
+            "{}",
+            String::from_utf8_lossy(&trace.stderr)
+        );
+        assert_eq!(String::from_utf8(trace.stdout).unwrap(), expected);
+        assert!(trace.stderr.is_empty());
+    }
+}
+
+#[test]
+fn run_rejects_invalid_tick_options_before_reporting_a_trace() {
+    for (options, reason) in [
+        (&["--ticks"][..], "回数を指定"),
+        (&["--ticks="][..], "64ビット符号なし整数"),
+        (&["--ticks", "-1"][..], "64ビット符号なし整数"),
+        (&["--ticks", "1.5"][..], "64ビット符号なし整数"),
+        (
+            &["--ticks", "18446744073709551616"][..],
+            "64ビット符号なし整数",
+        ),
+        (&["--ticks", "1", "--ticks=2"][..], "一度だけ"),
+        (&["--ticks", "1", "--input="][..], "併用できない"),
+        (&["--input", "1", "--ticks", "1"][..], "併用できない"),
+        (
+            &["--ticks", "0", "examples/latch.ncg2"][..],
+            "入力ポートがない回路",
+        ),
+    ] {
+        let mut args = vec!["run"];
+        args.extend_from_slice(options);
+        let invalid = cli(&args);
+        assert_eq!(invalid.status.code(), Some(1), "{options:?}");
+        assert!(invalid.stdout.is_empty(), "{options:?}");
+        let stderr = String::from_utf8(invalid.stderr).unwrap();
+        assert!(stderr.contains(reason), "{options:?}: {stderr}");
+    }
+}
+
+#[test]
 fn run_reports_the_ram_call_that_exceeds_the_memory_limit() {
     let failure = cli(&[
         "run",
