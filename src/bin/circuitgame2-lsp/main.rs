@@ -8,6 +8,8 @@ mod definition;
 mod diagnostic;
 #[cfg(not(target_os = "wasi"))]
 mod server;
+#[cfg(not(target_os = "wasi"))]
+mod sources;
 
 #[cfg(not(target_os = "wasi"))]
 fn main() -> ExitCode {

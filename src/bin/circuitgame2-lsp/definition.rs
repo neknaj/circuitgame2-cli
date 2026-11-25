@@ -1,40 +1,15 @@
-//! 設定と開いている文書からスナップショットを作り、Core が解決した宣言の位置を返す。
+//! カーソルの参照を Core で解決し、宣言の位置を返す。
 
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
-    fs, io,
-    path::{Component, Path, PathBuf},
-};
-
-use circuitgame2_cli::config;
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding, TextPosition},
     project::{
-        CircuitProject, DefinitionBinding, LocatedName, ProjectSource, SourceSnapshot, VirtualPath,
-        check_use_aliases, index_use_targets, normalize_path, parse_circuit_project,
-        validate_circuit_basis,
+        CircuitProject, DefinitionBinding, LocatedName, VirtualPath, check_use_aliases,
+        index_use_targets, normalize_path, parse_circuit_project, validate_circuit_basis,
     },
 };
-use lsp_types::{Location, Uri};
-use url::Url;
+use lsp_types::Location;
 
-use super::diagnostic::wire_range;
-
-/// エディタが保持している版。同期に失敗した版は本文を持たない。
-#[derive(Clone, Copy)]
-pub(super) struct OpenDocument<'a> {
-    pub(super) uri: &'a Uri,
-    pub(super) text: Option<&'a str>,
-    pub(super) version: i32,
-}
-
-struct Source<'a> {
-    id: String,
-    uri: Uri,
-    text: Cow<'a, str>,
-    revision: u64,
-}
+use super::sources::{OpenDocument, SourceSet};
 
 /// 指定位置にある `def` の参照、`use`、`module-part` の対象が指す宣言を探す。
 ///
@@ -55,39 +30,15 @@ pub(super) fn locate<'a>(
     let Some(offset) = LineIndex::new(text).position_to_byte(position, encoding) else {
         return Ok(None);
     };
-    let (current_id, sources) = match file_path(current.uri) {
-        Some(file) => match configured_sources(&file)? {
-            Some((current_id, paths)) => {
-                let sources = load_sources(paths, &current_id, current, open)?;
-                (current_id, sources)
-            }
-            None => standalone(&current)?,
-        },
-        None => standalone(&current)?,
-    };
-    let snapshots: Vec<_> = sources
-        .iter()
-        .map(|source| SourceSnapshot {
-            path: &source.id,
-            text: &source.text,
-            revision: source.revision,
-        })
-        .collect();
+    let (current_id, sources) = SourceSet::load(current, open)?;
+    let snapshots = sources.snapshots();
     let Ok(project) = parse_circuit_project(&snapshots) else {
         return Ok(None);
     };
     let current = normalize_path(&current_id)
         .map_err(|_| format!("{current_id} の仮想パスを解釈できない。"))?;
     let target = resolved_location(&project, &current, offset);
-    Ok(target.and_then(|location| {
-        let source = location.source;
-        let target = sources
-            .iter()
-            .find(|loaded| from_file(source, &loaded.id))?;
-        let lines = LineIndex::new(source.text);
-        let range = wire_range(&lines, source.text.as_bytes(), &location.span, encoding)?;
-        Some(Location::new(target.uri.clone(), range))
-    }))
+    Ok(target.and_then(|location| sources.location(location, encoding)))
 }
 
 fn resolved_location<'p, 'a>(
@@ -121,8 +72,6 @@ fn resolved_location<'p, 'a>(
     }
     targets.alias_location(current, offset)
 }
-
-type OpenSources<'a> = BTreeMap<PathBuf, Option<OpenDocument<'a>>>;
 
 #[cfg(test)]
 mod tests {
@@ -197,218 +146,4 @@ mod tests {
         assert_eq!(query(3, 35), None);
         assert_eq!(query(4, 30), None);
     }
-}
-
-fn load_sources<'a>(
-    paths: Vec<(String, PathBuf)>,
-    current_id: &str,
-    current: OpenDocument<'a>,
-    open: impl Iterator<Item = OpenDocument<'a>>,
-) -> Result<Vec<Source<'a>>, String> {
-    let mut overlays = OpenSources::new();
-    for (path, doc) in open.filter_map(|doc| file_path(doc.uri).map(|path| (path, doc))) {
-        match overlays.entry(path) {
-            Entry::Vacant(entry) => {
-                entry.insert(Some(doc));
-            }
-            Entry::Occupied(mut entry) => {
-                entry.insert(None);
-            }
-        }
-    }
-    // 依頼元の URI が設定の綴りと異なっていても、選んだ仮想 ID にはその本文を使う。
-    for (id, path) in &paths {
-        if id == current_id {
-            overlays.insert(path.clone(), Some(current));
-            break;
-        }
-    }
-    #[cfg(windows)]
-    add_windows_overlays(&paths, &mut overlays);
-    paths
-        .into_iter()
-        .map(|(id, path)| match overlays.get(&path) {
-            Some(Some(doc)) => opened(id, doc),
-            Some(None) => Err(format!("{} に開いている本文が複数ある。", path.display())),
-            None => on_disk(id, &path),
-        })
-        .collect()
-}
-
-#[cfg(windows)]
-fn add_windows_overlays(paths: &[(String, PathBuf)], overlays: &mut OpenSources<'_>) {
-    let declared: BTreeSet<_> = paths.iter().map(|(_, path)| path).collect();
-    let mut unmatched = OpenSources::new();
-    for (path, doc) in overlays.iter().filter(|(path, _)| !declared.contains(path)) {
-        if let Ok(host_id) = fs::canonicalize(path) {
-            match unmatched.entry(host_id) {
-                Entry::Vacant(entry) => {
-                    entry.insert(*doc);
-                }
-                Entry::Occupied(mut entry) => {
-                    entry.insert(None);
-                }
-            }
-        }
-    }
-    if unmatched.is_empty() {
-        return;
-    }
-    // 実体が同じ設定パスが複数あれば、仮想 ID ごとに一致する URI だけを使う。
-    let mut hosts = BTreeMap::new();
-    for (_, path) in paths {
-        if let Ok(host_id) = fs::canonicalize(path)
-            && unmatched.contains_key(&host_id)
-        {
-            match hosts.entry(host_id) {
-                Entry::Vacant(entry) => {
-                    entry.insert(Some(path));
-                }
-                Entry::Occupied(mut entry) => {
-                    entry.insert(None);
-                }
-            }
-        }
-    }
-    for (host_id, path) in hosts {
-        if let Some(path) = path
-            && let Some(doc) = unmatched.remove(&host_id)
-        {
-            overlays.entry(path.clone()).or_insert(doc);
-        }
-    }
-}
-
-fn from_file(project_source: &ProjectSource<'_>, id: &str) -> bool {
-    let Ok(id) = normalize_path(id) else {
-        return false;
-    };
-    project_source.id.same_file(&id)
-}
-
-fn standalone<'a>(doc: &OpenDocument<'a>) -> Result<(String, Vec<Source<'a>>), String> {
-    let id = "document.ncg2";
-    Ok((id.into(), vec![opened(id.into(), doc)?]))
-}
-
-fn opened<'a>(id: String, doc: &OpenDocument<'a>) -> Result<Source<'a>, String> {
-    let text = doc
-        .text
-        .ok_or_else(|| format!("{} の最新版の本文を取得できない。", doc.uri.as_str()))?;
-    // ディスクから読んだ版は 0。LSP は負の版番号も使えるため、符号付きの順序を保ってずらす。
-    let revision = (i64::from(doc.version) - i64::from(i32::MIN) + 1) as u64;
-    Ok(Source {
-        id,
-        uri: doc.uri.clone(),
-        text: Cow::Borrowed(text),
-        revision,
-    })
-}
-
-fn on_disk<'a>(id: String, path: &Path) -> Result<Source<'a>, String> {
-    let uri: Uri = Url::from_file_path(path)
-        .map_err(|_| format!("{} をファイル URI にできない。", path.display()))?
-        .as_str()
-        .parse()
-        .map_err(|_| format!("{} のファイル URI を解釈できない。", path.display()))?;
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("{} を UTF-8 で読み込めない ({error})。", path.display()))?;
-    Ok(Source {
-        id,
-        uri,
-        text: Cow::Owned(text),
-        revision: 0,
-    })
-}
-
-fn file_path(uri: &Uri) -> Option<PathBuf> {
-    let url = Url::parse(uri.as_str()).ok()?;
-    if url.scheme() != "file" || url.fragment().is_some() || url.query().is_some() {
-        return None;
-    }
-    url.to_file_path().ok()
-}
-
-type ConfiguredSources = (String, Vec<(String, PathBuf)>);
-
-/// 最寄りの設定が選んだソースだけを、設定の初出順に返す。
-fn configured_sources(file: &Path) -> Result<Option<ConfiguredSources>, String> {
-    let Some(parent) = file.parent() else {
-        return Ok(None);
-    };
-    let Some((root, manifest)) = nearest_manifest(parent)? else {
-        return Ok(None);
-    };
-    let settings = config::read_settings(&manifest)?;
-    let mut seen = BTreeSet::new();
-    let mut paths = Vec::new();
-    let mut current_id = None;
-    for source in settings.sources.into_inner() {
-        let path = normalize_path(source.get_ref()).map_err(|error| {
-            config::at(
-                &manifest,
-                Some(source.span()),
-                &format!("ソースのパスを正規化できない ({error:?})。"),
-            )
-        })?;
-        if path.source_kind().is_none() {
-            return Err(config::at(
-                &manifest,
-                Some(source.span()),
-                "ソースの拡張子には .ncg2 または .ncg2m を指定する。",
-            ));
-        }
-        let id = path.components().join("/");
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        if Path::new(&id)
-            .components()
-            .any(|part| matches!(part, Component::Prefix(_) | Component::RootDir))
-        {
-            return Err(config::at(
-                &manifest,
-                Some(source.span()),
-                "ソースは設定ファイルからの相対パスで指定する。",
-            ));
-        }
-        let host = root.join(&id);
-        if host == file {
-            current_id = Some(id.clone());
-        }
-        paths.push((id, host));
-    }
-    #[cfg(windows)]
-    if current_id.is_none() {
-        current_id = windows_source_id(file, &paths);
-    }
-    Ok(current_id.map(|id| (id, paths)))
-}
-
-#[cfg(windows)]
-fn windows_source_id(file: &Path, paths: &[(String, PathBuf)]) -> Option<String> {
-    let host_id = fs::canonicalize(file).ok()?;
-    let mut matching = paths
-        .iter()
-        .filter(|(_, path)| fs::canonicalize(path).is_ok_and(|identity| identity == host_id));
-    let (id, _) = matching.next()?;
-    matching.next().is_none().then(|| id.clone())
-}
-
-fn nearest_manifest(parent: &Path) -> Result<Option<(&Path, PathBuf)>, String> {
-    for root in parent.ancestors() {
-        let manifest = root.join("circuitgame2.toml");
-        match fs::metadata(&manifest) {
-            Ok(_) => return Ok(Some((root, manifest))),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(config::at(
-                    &manifest,
-                    None,
-                    &format!("設定の有無を確認できない ({error})。"),
-                ));
-            }
-        }
-    }
-    Ok(None)
 }

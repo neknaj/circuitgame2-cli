@@ -2,7 +2,7 @@
 
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     io::{self, BufRead, Write},
     process::ExitCode,
 };
@@ -16,7 +16,10 @@ use lsp_types::{
     TextDocumentSyncOptions, Uri, VersionedTextDocumentIdentifier,
 };
 
-use super::{definition, diagnostic};
+use super::{
+    definition, diagnostic,
+    sources::{self, OpenDocument, ProjectKey, SourcePaths, SourceSet},
+};
 
 #[derive(Clone, Copy, Default)]
 enum State {
@@ -30,6 +33,13 @@ enum State {
 struct Document {
     version: i32,
     text: Option<String>,
+    syntax: Vec<lsp_types::Diagnostic>,
+    published: Option<(i32, Vec<lsp_types::Diagnostic>)>,
+}
+
+struct DocumentUpdate {
+    encoding: PositionEncoding,
+    syntax: Option<Message>,
 }
 
 #[derive(Default)]
@@ -53,8 +63,13 @@ pub(super) fn run(input: &mut impl BufRead, output: &mut impl Write) -> io::Resu
                 });
             }
             Message::Notification(notification) => {
-                if let Some(result) = server.notification(notification) {
-                    result.write(output)?;
+                if let Some(change) = server.notification(notification) {
+                    if let Some(syntax) = change.syntax {
+                        syntax.write(output)?;
+                    }
+                    for message in server.publish_changed(change.encoding) {
+                        message.write(output)?;
+                    }
                 }
             }
             Message::Response(_) => {}
@@ -177,7 +192,7 @@ impl Server {
         }
     }
 
-    fn notification(&mut self, notification: Notification) -> Option<Message> {
+    fn notification(&mut self, notification: Notification) -> Option<DocumentUpdate> {
         match (self.state, notification.method.as_str()) {
             (State::AwaitingInitialized, "initialized") => {
                 self.state = State::Ready;
@@ -189,13 +204,16 @@ impl Server {
                 if item.language_id != "ncg2" || self.documents.contains_key(&item.uri) {
                     return None;
                 }
-                let document = Document {
+                let encoding = self.encoding?;
+                let mut document = Document {
                     version: item.version,
+                    syntax: diagnostic::collect(&item.uri, &item.text, encoding),
                     text: Some(item.text),
+                    published: None,
                 };
-                let result = publish(&item.uri, &document, self.encoding?);
+                let syntax = document.publish_syntax(&item.uri);
                 self.documents.insert(item.uri, document);
-                Some(result)
+                Some(DocumentUpdate { encoding, syntax })
             }
             (State::Ready, "textDocument/didChange") => {
                 let mut parameters = notification.params;
@@ -210,22 +228,114 @@ impl Server {
                     .get_mut("contentChanges")
                     .and_then(|changes| decode(changes.take()));
                 document.change(item.version, changes, encoding);
-                Some(publish(&item.uri, document, encoding))
+                document.syntax = document
+                    .text
+                    .as_ref()
+                    .map(|text| diagnostic::collect(&item.uri, text, encoding))
+                    .unwrap_or_default();
+                Some(DocumentUpdate {
+                    encoding,
+                    syntax: document.publish_syntax(&item.uri),
+                })
             }
             (State::Ready, "textDocument/didClose") => {
                 let params: DidCloseTextDocumentParams = decode(notification.params)?;
                 let uri = params.text_document.uri;
                 self.documents.remove(&uri)?;
-                Some(diagnostics_notification(uri, None, Vec::new()))
+                Some(DocumentUpdate {
+                    encoding: self.encoding?,
+                    syntax: Some(diagnostics_notification(uri, None, Vec::new())),
+                })
             }
             _ => None,
         }
     }
+
+    fn publish_changed(&mut self, encoding: PositionEncoding) -> Vec<Message> {
+        let mut groups =
+            BTreeMap::<ProjectKey, (SourcePaths, Vec<(String, OpenDocument<'_>)>)>::new();
+        let mut reports = HashMap::new();
+        let mut open_documents: Vec<_> = self.documents.iter().collect();
+        open_documents.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+        for (uri, document) in open_documents {
+            reports.insert(uri.clone(), document.syntax.clone());
+            let current = document.open_snapshot(uri);
+            match sources::select(uri) {
+                Ok(Some(configured)) => {
+                    let (project, id, paths) = configured.for_diagnostics();
+                    let group = groups.entry(project).or_insert_with(|| (paths, Vec::new()));
+                    group.1.push((id, current));
+                }
+                Ok(None) if document.syntax.is_empty() => {
+                    if let Ok(snapshot) = SourceSet::single(current) {
+                        for (uri, item) in diagnostic::collect_references(&snapshot, encoding) {
+                            reports.get_mut(&uri).unwrap().push(item);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (paths, documents) in groups.into_values() {
+            let open = self
+                .documents
+                .iter()
+                .map(|(uri, doc)| doc.open_snapshot(uri));
+            // 同じ設定の文書には、一つの解析で確定した診断を配る。
+            let Ok(snapshot) = SourceSet::load_group(paths, &documents, open) else {
+                continue;
+            };
+            let members: HashSet<_> = documents.iter().map(|(_, doc)| doc.uri).collect();
+            for (uri, item) in diagnostic::collect_references(&snapshot, encoding) {
+                if members.contains(&uri) {
+                    reports.get_mut(&uri).unwrap().push(item);
+                }
+            }
+        }
+        let mut updates: Vec<_> = reports
+            .into_iter()
+            .filter_map(|(uri, diagnostics)| {
+                let document = &self.documents[&uri];
+                if let Some((version, previous)) = &document.published {
+                    if *version == document.version && *previous == diagnostics {
+                        return None;
+                    }
+                }
+                Some((uri, document.version, diagnostics))
+            })
+            .collect();
+        updates.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+        updates
+            .into_iter()
+            .map(|(uri, version, diagnostics)| {
+                let document = self.documents.get_mut(&uri).unwrap();
+                document.published = Some((version, diagnostics.clone()));
+                diagnostics_notification(uri, Some(version), diagnostics)
+            })
+            .collect()
+    }
 }
 
 impl Document {
-    fn open_snapshot<'a>(&'a self, uri: &'a Uri) -> definition::OpenDocument<'a> {
-        definition::OpenDocument {
+    fn publish_syntax(&mut self, uri: &Uri) -> Option<Message> {
+        if self.syntax.is_empty()
+            && self
+                .published
+                .as_ref()
+                .is_none_or(|(_, diagnostics)| diagnostics.is_empty())
+        {
+            return None;
+        }
+        self.published = Some((self.version, self.syntax.clone()));
+        Some(diagnostics_notification(
+            uri.clone(),
+            Some(self.version),
+            self.syntax.clone(),
+        ))
+    }
+
+    fn open_snapshot<'a>(&'a self, uri: &'a Uri) -> OpenDocument<'a> {
+        OpenDocument {
             uri,
             text: self.text.as_deref(),
             version: self.version,
@@ -301,15 +411,6 @@ fn decode<T: serde::de::DeserializeOwned>(parameters: serde_json::Value) -> Opti
             None
         }
     }
-}
-
-fn publish(uri: &Uri, document: &Document, encoding: PositionEncoding) -> Message {
-    let diagnostics = document
-        .text
-        .as_ref()
-        .map(|text| diagnostic::collect(uri, text, encoding))
-        .unwrap_or_default();
-    diagnostics_notification(uri.clone(), Some(document.version), diagnostics)
 }
 
 fn diagnostics_notification(
