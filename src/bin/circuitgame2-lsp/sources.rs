@@ -2,7 +2,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
     fs, io,
     path::{Component, Path, PathBuf},
 };
@@ -48,6 +48,61 @@ enum SourceOrigin {
 pub(super) struct SourceSet<'a> {
     sources: Vec<Source<'a>>,
     project: Option<ProjectKey>,
+}
+
+// 設定の切り替えを繰り返しても、閉じた本文と索引の保持が増え続けないようにする。
+const MAX_DISK_SOURCES: usize = 64;
+const MAX_DISK_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+
+struct DiskSyntax {
+    path: PathBuf,
+    id: String,
+    index: CachedCircuitRecovery,
+}
+
+/// ディスクから読んだ正常な文書の厳格ビルド索引を保持する。
+#[derive(Default)]
+pub(super) struct DiskSyntaxCache {
+    entries: VecDeque<DiskSyntax>,
+    source_bytes: usize,
+}
+
+impl DiskSyntaxCache {
+    fn candidate(&self, path: &Path, id: &str) -> Option<&CachedCircuitRecovery> {
+        self.entries
+            .iter()
+            .find(|entry| entry.path == path && entry.id == id)
+            .map(|entry| &entry.index)
+    }
+
+    fn insert(&mut self, item: DiskSyntax) {
+        if let Some(position) = self
+            .entries
+            .iter()
+            .position(|entry| entry.path == item.path && entry.id == item.id)
+            && let Some(entry) = self.entries.remove(position)
+        {
+            self.source_bytes -= entry.index.text().len();
+        }
+        let len = item.index.text().len();
+        while self.entries.len() == MAX_DISK_SOURCES
+            || self.source_bytes + len > MAX_DISK_SOURCE_BYTES
+        {
+            let Some(entry) = self.entries.pop_front() else {
+                return;
+            };
+            self.source_bytes -= entry.index.text().len();
+        }
+        self.entries.push_back(item);
+        self.source_bytes += len;
+    }
+
+    /// 公開前の照合を通ったソース集合の索引を登録する。
+    pub(super) fn extend(&mut self, staged: Self) {
+        for item in staged.entries {
+            self.insert(item);
+        }
+    }
 }
 
 pub(super) type SourcePaths = Vec<(String, PathBuf)>;
@@ -197,7 +252,49 @@ impl<'a> SourceSet<'a> {
     ///
     /// 構文、言語、ソース指定に違反があるとき、厳格解析の診断を返す。
     pub(super) fn parse_strict(&self) -> Result<CircuitProject<'_>, CircuitProjectError<'_>> {
-        parse_circuit_project_with_cached_indexes(&self.snapshots(), &self.syntax_cache())
+        self.parse_strict_with_disk_cache(None)
+    }
+
+    /// ディスクから再読込した本文がキャッシュの本文と一致すれば、索引を再利用する。
+    ///
+    /// # Errors
+    ///
+    /// 構文、言語、ソース指定に違反があるとき、厳格解析の診断を返す。
+    pub(super) fn parse_strict_with_disk_cache(
+        &self,
+        disk: Option<&DiskSyntaxCache>,
+    ) -> Result<CircuitProject<'_>, CircuitProjectError<'_>> {
+        let candidates: Vec<_> = self
+            .sources
+            .iter()
+            .map(|source| match &source.origin {
+                SourceOrigin::Disk(path) => disk?.candidate(path, &source.id),
+                SourceOrigin::Editor(_) => source.analysis,
+            })
+            .collect();
+        parse_circuit_project_with_cached_indexes(&self.snapshots(), &candidates)
+    }
+
+    /// 厳格解析に成功した閉文書のうち、登録する索引を用意する。
+    ///
+    /// ディスクの本文を公開直前に照合し、成功した場合にだけ登録する。
+    pub(super) fn stage_disk_indexes(&self, disk: &DiskSyntaxCache) -> DiskSyntaxCache {
+        let mut staged = DiskSyntaxCache::default();
+        for source in &self.sources {
+            if let SourceOrigin::Disk(path) = &source.origin
+                && source.text.len() <= MAX_DISK_SOURCE_BYTES
+                && !disk
+                    .candidate(path, &source.id)
+                    .is_some_and(|old| old.text() == source.text)
+            {
+                staged.insert(DiskSyntax {
+                    path: path.clone(),
+                    id: source.id.clone(),
+                    index: CachedCircuitRecovery::analyze_with_build_index(source.text.to_string()),
+                });
+            }
+        }
+        staged
     }
 
     /// 開いている文書の回復結果を、ソーススナップショットと同じ順で返す。
@@ -530,6 +627,71 @@ fn nearest_manifest(parent: &Path) -> Result<Option<(&Path, PathBuf)>, String> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn disk_index_reuse_uses_the_current_body_and_first_syntax_error() {
+        let root = tempfile::tempdir().unwrap();
+        let basis = root.path().join("basis.ncg2");
+        let main = root.path().join("main.ncg2");
+        let config = root.path().join(config::FILE_NAME);
+        fs::write(&config, "sources = [\"basis.ncg2\", \"main.ncg2\"]\n").unwrap();
+        fs::write(&basis, "(using nor)").unwrap();
+        fs::write(&main, "").unwrap();
+        let uri = Url::from_file_path(&main)
+            .unwrap()
+            .as_str()
+            .parse()
+            .unwrap();
+        let open = OpenDocument {
+            uri: &uri,
+            text: Some("(func entry (in x) (out y) (def y (nor x x)))"),
+            version: 1,
+            analysis: None,
+        };
+        let (_, loaded) = SourceSet::load(open, [open].into_iter()).unwrap();
+        let mut disk = DiskSyntaxCache::default();
+        assert!(loaded.parse_strict_with_disk_cache(Some(&disk)).is_ok());
+        let staged = loaded.stage_disk_indexes(&disk);
+        assert!(loaded.still_current([(&uri, "main.ncg2")]));
+        disk.extend(staged);
+        assert!(disk.candidate(&basis, "basis.ncg2").is_some());
+        assert!(disk.candidate(&basis, "other.ncg2").is_none());
+
+        let (_, loaded) = SourceSet::load(open, [open].into_iter()).unwrap();
+        assert!(loaded.parse_strict_with_disk_cache(Some(&disk)).is_ok());
+        assert!(loaded.stage_disk_indexes(&disk).entries.is_empty());
+
+        // 同じ長さの別本文で、開いた文書にも構文違反があっても先頭の閉文書を診断する。
+        fs::write(&basis, ")using nor)").unwrap();
+        assert!(!loaded.still_current([(&uri, "main.ncg2")]));
+        let edited = OpenDocument {
+            text: Some("("),
+            version: 2,
+            ..open
+        };
+        let (_, loaded) = SourceSet::load(edited, [edited].into_iter()).unwrap();
+        let Err(CircuitProjectError::Syntax {
+            id,
+            revision,
+            error,
+        }) = loaded.parse_strict_with_disk_cache(Some(&disk))
+        else {
+            panic!("expected the first disk source's syntax error");
+        };
+        let Err(CircuitProjectError::Syntax {
+            id: full_id,
+            revision: full_revision,
+            error: full_error,
+        }) = loaded.parse_strict()
+        else {
+            panic!("expected the strict syntax error");
+        };
+        assert!(id.same_file(&full_id));
+        assert_eq!(id.components().join("/"), "basis.ncg2");
+        assert_eq!(revision, 0);
+        assert_eq!(revision, full_revision);
+        assert_eq!(error, full_error);
+    }
 
     #[test]
     fn rejects_a_snapshot_after_disk_source_or_settings_changes() {
