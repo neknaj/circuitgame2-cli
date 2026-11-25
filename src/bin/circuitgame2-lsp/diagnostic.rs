@@ -12,7 +12,7 @@ use circuitgame2_core::{
         ErrorKind, Repair,
         circuit::{
             CachedCircuitRecovery, CircuitFormError, CircuitRecovery, Clause, Head, HeaderError,
-            RecoveredFormOutcome,
+            OriginalCircuitList, RecoveredFormOutcome,
         },
     },
 };
@@ -24,6 +24,10 @@ use serde_json::json;
 
 use super::sources::SourceSet;
 
+mod local;
+pub(super) use local::LocalRecovery;
+
+#[derive(Clone)]
 struct Report {
     span: Range<usize>,
     code: &'static str,
@@ -38,7 +42,7 @@ pub(super) fn collect(
     encoding: PositionEncoding,
 ) -> Vec<Diagnostic> {
     let source = analysis.text();
-    let mut reports = match analysis.recovery() {
+    let reports = match analysis.recovery() {
         CircuitRecovery::Complete(_) => return Vec::new(),
         CircuitRecovery::Inspected { checked, .. } => checked
             .iter()
@@ -54,20 +58,29 @@ pub(super) fn collect(
             original,
         } => {
             let mut reports: Vec<_> = recovered.repairs.iter().map(repair).collect();
-            reports.extend(
-                original
-                    .iter()
-                    .flatten()
-                    .flat_map(|list| list.source_diagnostics())
-                    .flatten()
-                    .map(|error| match error {
-                        CircuitFormError::Syntax(error) => syntax(error.kind, error.span.clone()),
-                        CircuitFormError::Header { kind, span } => header(*kind, span.clone()),
-                    }),
-            );
+            reports.extend(original.iter().flatten().flat_map(original_reports));
             reports
         }
     };
+    render(uri, source, reports, encoding)
+}
+
+fn original_reports(list: &OriginalCircuitList) -> impl Iterator<Item = Report> + '_ {
+    list.source_diagnostics()
+        .iter()
+        .flatten()
+        .map(|error| match error {
+            CircuitFormError::Syntax(error) => syntax(error.kind, error.span.clone()),
+            CircuitFormError::Header { kind, span } => header(*kind, span.clone()),
+        })
+}
+
+fn render(
+    uri: &Uri,
+    source: &str,
+    mut reports: Vec<Report>,
+    encoding: PositionEncoding,
+) -> Vec<Diagnostic> {
     reports.sort_by_key(|report| (report.span.start, report.span.end));
     let lines = LineIndex::new(source);
     reports
