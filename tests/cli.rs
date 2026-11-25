@@ -473,6 +473,89 @@ fn mixed_check_reports_nested_input_and_output_types_with_original_ranges() {
 }
 
 #[test]
+fn mixed_check_reports_selection_diagnostics_and_width_origins() {
+    let folder = tempfile::tempdir().unwrap();
+    let dir = folder.path();
+    let settings = dir.join("circuitgame2.toml");
+    let main = dir.join("main.ncg2");
+    let library = "; ライブラリ\n(namespace lib (struct Word (width 4)) (export Word echo)
+        (func echo (in (w Word)) (out (w Word))))";
+    fs::write(
+        &settings,
+        "sources = [\"main.ncg2\", \"library.ncg2\", \"helper.ncg2m\"]\n",
+    )
+    .unwrap();
+    fs::write(dir.join("library.ncg2"), library).unwrap();
+    fs::write(dir.join("helper.ncg2m"), "").unwrap();
+    let check = |source: &str| {
+        fs::write(&main, source).unwrap();
+        let result = cli(&[
+            "check",
+            "--format",
+            "json",
+            "--project",
+            settings.to_str().unwrap(),
+        ]);
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert!(result.stderr.is_empty());
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["diagnostics"].as_array().unwrap().len(), 1);
+        report["diagnostics"][0].clone()
+    };
+    let location = |path: &str, start, len| {
+        serde_json::json!({
+            "path": path, "range": {"start": start, "end": start + len}
+        })
+    };
+
+    let outside =
+        "; 🐈\n(using nor) (func bad (in (a (bits 8))) (out y) (def y (bit (slice a 0 4 2) 4)))";
+    let error = check(outside);
+    let inner = "(slice a 0 4 2)";
+    assert_eq!(error["code"], "selection_argument");
+    assert_eq!(
+        error["location"],
+        location("main.ncg2", outside.rfind("4)").unwrap(), 1)
+    );
+    assert_eq!(
+        error["related"],
+        serde_json::json!([location(
+            "main.ncg2",
+            outside.find(inner).unwrap(),
+            inner.len()
+        )])
+    );
+    assert!(error["message"].as_str().unwrap().contains("末尾添字 4"));
+
+    let struct_input = "; 🐈\n(using nor) (func bad (in (a ::lib::Word)) (out y)
+        (def same (::lib::echo a)) (def y (bit same 0)))";
+    let error = check(struct_input);
+    assert_eq!(error["code"], "selection_input_type");
+    assert_eq!(
+        error["location"],
+        location(
+            "main.ncg2",
+            struct_input.rfind("same").unwrap(),
+            "same".len()
+        )
+    );
+    assert_eq!(
+        error["related"],
+        serde_json::json!([location(
+            "library.ncg2",
+            library.rfind("Word").unwrap(),
+            "Word".len()
+        )])
+    );
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("ビット列が必要")
+    );
+}
+
+#[test]
 fn mixed_check_reports_basis_errors_before_resolving_names() {
     let folder = tempfile::tempdir().unwrap();
     let dir = folder.path();

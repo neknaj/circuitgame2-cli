@@ -13,8 +13,8 @@ use circuitgame2_core::{
         ModuleAliasTypesError, ModuleBodyPosition, ModuleCallInputsError, ModuleCallPortsError,
         ModuleCallsError, ModuleConcatsError, ModuleDriverError, ModuleOutputTypesError,
         ModuleRootTypesError, ModuleSelectionsError, ModuleWiringError, OutputDriver,
-        PrimitiveModuleError, ResolvedPortType, SelectionArgumentError, StructureLayoutError,
-        StructureNumber, StructureNumberErrorKind, StructurePlacementError,
+        PrimitiveModuleError, ResolvedPortType, SelectionArgumentError, SignalType,
+        StructureLayoutError, StructureNumber, StructureNumberErrorKind, StructurePlacementError,
         StructureResolutionError, StructureTypeError, VramOutputError,
     },
 };
@@ -457,12 +457,7 @@ fn module_expression(site: &str, error: ModuleSelectionsError<'_, '_>) -> String
             "{} ビット選択の結果幅 {width} が上限 {limit} を超える。",
             located(&expression),
         ),
-        ModuleSelectionsError::InputType { input, actual } => format!(
-            "{} ビット選択にはビット列が必要だが、型は {}。\n  入力の型 {}",
-            located(&input),
-            port_type(actual.ty),
-            located(&actual.origin),
-        ),
+        ModuleSelectionsError::InputType { input, actual } => selection_input_type(&input, &actual),
         ModuleSelectionsError::Types(ModuleAliasTypesError::Sources(
             ModuleRootTypesError::Wiring(ModuleWiringError::Undefined(at)),
         )) => {
@@ -617,7 +612,21 @@ fn driver_bits_error(error: ClockedDriverBitsError) -> String {
     }
 }
 
-fn selection(error: SelectionArgumentError<'_, '_>) -> String {
+/// ビット選択の起点と、その型の出典を表示する。
+pub(crate) fn selection_input_type(
+    input: &LocatedName<'_, '_>,
+    actual: &SignalType<'_, '_>,
+) -> String {
+    format!(
+        "{} ビット選択にはビット列が必要だが、型は {}。\n  入力の型 {}",
+        located(input),
+        port_type(actual.ty),
+        located(&actual.origin),
+    )
+}
+
+/// 数値引数で見つかった違反を表示する。
+pub(crate) fn selection(error: SelectionArgumentError<'_, '_>) -> String {
     match error {
         SelectionArgumentError::NaturalOverflow { site, argument } => format!(
             "{} ビット選択の数値引数が 64 ビットの自然数の範囲を超える ({argument:?})。",
