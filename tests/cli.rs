@@ -530,6 +530,27 @@ fn namespace_selection_and_diagnostics_preserve_file_boundaries() {
             serde_json::json!({"start": start, "end": start + target.len()})
         );
     }
+
+    fs::write(
+        folder.0.join("wrong-type.ncg2"),
+        wrong_type.replace("(using nor)", ""),
+    )
+    .unwrap();
+    let machine = run(&[
+        "check",
+        "--format",
+        "json",
+        "left.ncg2",
+        "right.ncg2",
+        "wrong-type.ncg2",
+    ]);
+    assert_eq!(machine.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(report["diagnostics"][0]["code"], "output_type_mismatch");
+    assert_eq!(
+        report["diagnostics"][0]["location"]["path"],
+        "wrong-type.ncg2"
+    );
 }
 
 #[test]

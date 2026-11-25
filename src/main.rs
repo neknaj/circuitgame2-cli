@@ -21,8 +21,9 @@ use std::{
 use circuitgame2_cli::config;
 use circuitgame2_core::{
     project::{
-        CircuitProject, ModuleBodyPosition, NameKey, SourceKind, SourceSnapshot, UseTargets,
-        analyze_definitions, check_use_aliases, normalize_path, parse_circuit_project,
+        CircuitProject, DefinitionAnalysisError, ModuleBodyPosition, NameKey,
+        PreparedDefinitionError, SourceKind, SourceSnapshot, UseAliases, UseTargets,
+        normalize_path, parse_circuit_project, prepare_definition_analysis,
     },
     syntax::circuit::Head,
 };
@@ -569,26 +570,33 @@ fn execute(
     if matches!(command, Command::Dump(_)) {
         return dump::write(&project, stdout).map(|()| ExitCode::SUCCESS);
     }
-    let analysis = analyze_definitions(&project).map_err(|error| {
+    let prepared = prepare_definition_analysis(&project).map_err(|error| {
         if let Some(report) = &mut report {
             report.analysis_error(&error);
         }
-        source_diagnostic(diagnostic::analysis_error(
-            error,
-            &source_diagnostic,
-            report.is_none(),
-        ))
+        source_diagnostic(diagnostic::analysis_error(error))
     })?;
-    if let Some(report) = &mut report {
-        report.warnings(&analysis.aliases);
-    } else {
-        diagnostic::alias_warnings(&analysis.aliases, &source_diagnostic);
-    }
+    let checked = prepared.resolve().map_err(|error| match error {
+        PreparedDefinitionError::Alias(conflict) => {
+            let error = DefinitionAnalysisError::Alias(conflict);
+            if let Some(report) = &mut report {
+                report.analysis_error(&error);
+            }
+            source_diagnostic(diagnostic::analysis_error(error))
+        }
+        PreparedDefinitionError::Definition { error, aliases } => {
+            alias_diagnostics(&aliases, &mut report, &source_diagnostic);
+            if let Some(report) = &mut report {
+                report.definition_error(&error);
+            }
+            source_diagnostic(diagnostic::reference_error(error))
+        }
+    })?;
+    let aliases = checked.aliases();
+    alias_diagnostics(aliases, &mut report, &source_diagnostic);
 
     if matches!(command, Command::Check { .. }) {
-        let aliases = check_use_aliases(&analysis.aliases.targets)
-            .map_err(|error| source_diagnostic(diagnostic::alias_error(error)))?;
-        check_body::check(&project, &aliases, &mut report).map_err(&source_diagnostic)?;
+        check_body::check(&project, &checked, &mut report).map_err(&source_diagnostic)?;
         if let Some((path, settings)) = &settings
             && !settings.device.is_empty()
         {
@@ -597,15 +605,16 @@ fn execute(
                 .as_ref()
                 .map_or("::main", |name| name.get_ref());
             let (file, entry) =
-                declaration_position(&project, &analysis.aliases.targets, name, Head::Module)
-                    .map_err(|error| {
+                declaration_position(&project, prepared.targets(), name, Head::Module).map_err(
+                    |error| {
                         config::at(
                             path,
                             settings.entry.as_ref().map(|entry| entry.span()),
                             &error,
                         )
-                    })?;
-            device_config::check(path, settings, &aliases, ModuleBodyPosition { file, entry })?;
+                    },
+                )?;
+            device_config::check(path, settings, aliases, ModuleBodyPosition { file, entry })?;
         }
     }
 
@@ -626,21 +635,23 @@ fn execute(
                 .map(|()| ExitCode::SUCCESS);
         }
     };
-    let (file, entry) = declaration_position(&project, &analysis.aliases.targets, name, kind)
-        .map_err(|error| match (&command, &settings) {
-            (Command::Run { .. } | Command::Settle { .. }, Some((path, settings))) => config::at(
-                path,
-                settings.entry.as_ref().map(|entry| entry.span()),
-                &error,
-            ),
-            _ => error,
+    let (file, entry) =
+        declaration_position(&project, prepared.targets(), name, kind).map_err(|error| {
+            match (&command, &settings) {
+                (Command::Run { .. } | Command::Settle { .. }, Some((path, settings))) => {
+                    config::at(
+                        path,
+                        settings.entry.as_ref().map(|entry| entry.span()),
+                        &error,
+                    )
+                }
+                _ => error,
+            }
         })?;
-    let aliases = check_use_aliases(&analysis.aliases.targets)
-        .map_err(|error| source_diagnostic(diagnostic::alias_error(error)))?;
     if let Command::Run { frames, vram, .. } = command {
         return clocked::trace(
             &project,
-            &aliases,
+            aliases,
             ModuleBodyPosition { file, entry },
             clocked::TraceOptions {
                 name,
@@ -655,7 +666,7 @@ fn execute(
     if let Command::Settle { condition, .. } = command {
         return settling::analyze(
             &project,
-            &aliases,
+            aliases,
             ModuleBodyPosition { file, entry },
             name,
             condition,
@@ -690,6 +701,18 @@ fn execute(
     writeln!(stdout, "{}", format_bits(output))
         .map_err(output_error)
         .map(|()| ExitCode::SUCCESS)
+}
+
+fn alias_diagnostics(
+    aliases: &UseAliases<'_, '_, '_>,
+    report: &mut Option<&mut check_report::Report<'_>>,
+    contextualize: impl Fn(String) -> String,
+) {
+    if let Some(report) = report {
+        report.warnings(aliases.directives(), aliases.dispositions());
+    } else {
+        diagnostic::alias_warnings(aliases.directives(), aliases.dispositions(), contextualize);
+    }
 }
 
 /// 入力が 0 と 1 だけで構成され、ポートの合計幅に一致することを確認する。

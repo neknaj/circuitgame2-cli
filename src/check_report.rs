@@ -5,8 +5,8 @@ use std::{io::Write, ops::Range, path::Path, process::ExitCode};
 use circuitgame2_core::{
     project::{
         AbsoluteTarget, AliasConflict, AliasDisposition, CircuitBasisError, CircuitProjectError,
-        DefinitionAnalysisError, DefinitionReferenceReason, ExportError, LocatedName,
-        UseAliasReport, UseTargetError,
+        DefinitionAnalysisError, DefinitionBatchError, DefinitionReferenceReason, ExportError,
+        LocatedName, ResolvedUse, UseTargetError,
     },
     syntax::circuit::{CircuitFormError, HeaderError},
 };
@@ -86,6 +86,41 @@ impl Diagnostic {
         }
     }
 
+    fn definition(error: &DefinitionBatchError<'_, '_>) -> Self {
+        let (code, related) = match &error.reason {
+            DefinitionReferenceReason::Missing => ("missing_reference", None),
+            DefinitionReferenceReason::MissingPrefix => ("missing_reference_prefix", None),
+            DefinitionReferenceReason::Private(site) => {
+                ("private_reference", Some(Location::name(site)))
+            }
+            DefinitionReferenceReason::Namespace(site) => {
+                ("namespace_reference", Some(Location::name(site)))
+            }
+            DefinitionReferenceReason::DeclarationPrefix { source, form } => (
+                "declaration_prefix",
+                Some(Location {
+                    path: source.id.components().join("/"),
+                    range: form.name.span.clone(),
+                }),
+            ),
+            DefinitionReferenceReason::WrongDeclaration { source, form } => (
+                "wrong_declaration_kind",
+                Some(Location {
+                    path: source.id.components().join("/"),
+                    range: form.name.span.clone(),
+                }),
+            ),
+        };
+        Self::error(
+            code,
+            Some(Location {
+                path: error.site.source.id.components().join("/"),
+                range: error.site.name.span.clone(),
+            }),
+            related.into_iter().collect(),
+        )
+    }
+
     fn analysis(error: &DefinitionAnalysisError<'_, '_>) -> Self {
         match error {
             DefinitionAnalysisError::Basis(CircuitBasisError::Missing) => {
@@ -98,40 +133,7 @@ impl Diagnostic {
                     vec![Location::name(first)],
                 )
             }
-            DefinitionAnalysisError::Definition { error, .. } => {
-                let (code, related) = match &error.reason {
-                    DefinitionReferenceReason::Missing => ("missing_reference", None),
-                    DefinitionReferenceReason::MissingPrefix => ("missing_reference_prefix", None),
-                    DefinitionReferenceReason::Private(site) => {
-                        ("private_reference", Some(Location::name(site)))
-                    }
-                    DefinitionReferenceReason::Namespace(site) => {
-                        ("namespace_reference", Some(Location::name(site)))
-                    }
-                    DefinitionReferenceReason::DeclarationPrefix { source, form } => (
-                        "declaration_prefix",
-                        Some(Location {
-                            path: source.id.components().join("/"),
-                            range: form.name.span.clone(),
-                        }),
-                    ),
-                    DefinitionReferenceReason::WrongDeclaration { source, form } => (
-                        "wrong_declaration_kind",
-                        Some(Location {
-                            path: source.id.components().join("/"),
-                            range: form.name.span.clone(),
-                        }),
-                    ),
-                };
-                Self::error(
-                    code,
-                    Some(Location {
-                        path: error.site.source.id.components().join("/"),
-                        range: error.site.name.span.clone(),
-                    }),
-                    related.into_iter().collect(),
-                )
-            }
+            DefinitionAnalysisError::Definition { error, .. } => Self::definition(error),
             DefinitionAnalysisError::Alias(conflict) => {
                 let (site, related) = match conflict {
                     AliasConflict::BetweenUses { later, first } => (
@@ -236,10 +238,11 @@ impl<'a> Report<'a> {
     }
 
     pub(super) fn analysis_error(&mut self, error: &DefinitionAnalysisError<'_, '_>) {
-        if let DefinitionAnalysisError::Definition { aliases, .. } = error {
-            self.warnings(aliases);
-        }
         self.diagnostics.push(Diagnostic::analysis(error));
+    }
+
+    pub(super) fn definition_error(&mut self, error: &DefinitionBatchError<'_, '_>) {
+        self.diagnostics.push(Diagnostic::definition(error));
     }
 
     /// 診断と関連位置を、元ソースのバイト範囲として保存する。
@@ -255,9 +258,12 @@ impl<'a> Report<'a> {
             related.into_iter().map(Location::name).collect(),
         ));
     }
-    pub(super) fn warnings(&mut self, report: &UseAliasReport<'_, '_>) {
-        let directives = report.targets.directives();
-        for (alias, disposition) in directives.iter().zip(&report.dispositions) {
+    pub(super) fn warnings(
+        &mut self,
+        directives: &[ResolvedUse<'_, '_>],
+        dispositions: &[AliasDisposition],
+    ) {
+        for (alias, disposition) in directives.iter().zip(dispositions) {
             if let AliasDisposition::Duplicate { first } = disposition
                 && let Some(first) = directives.get(*first)
             {
