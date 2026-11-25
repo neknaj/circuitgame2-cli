@@ -371,7 +371,13 @@ impl Server {
             .documents
             .iter()
             .map(|(uri, doc)| doc.open_snapshot(uri));
-        let result = completion::collect(document.open_snapshot(uri), position, encoding, open);
+        let result = completion::collect(
+            document.open_snapshot(uri),
+            position,
+            encoding,
+            open,
+            &self.disk_syntax,
+        );
         Response::new_ok(request.id, result)
     }
 
