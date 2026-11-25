@@ -10,6 +10,7 @@ use std::{
 
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding, TextPosition, prepare_source_edit},
+    project::SourceKind,
     syntax::circuit::CachedCircuitRecovery,
 };
 use lsp_server::{ErrorCode, Message, Notification, Request, Response};
@@ -42,6 +43,7 @@ enum State {
 
 struct Document {
     version: i32,
+    kind: SourceKind,
     analysis: Option<DocumentAnalysis>,
     syntax: Vec<lsp_types::Diagnostic>,
     published: Option<(i32, Vec<lsp_types::Diagnostic>)>,
@@ -53,26 +55,47 @@ enum DocumentAnalysis {
         text: String,
         recovery: LocalRecovery,
     },
+    Functional(String),
 }
 
 impl DocumentAnalysis {
+    fn analyze(
+        kind: SourceKind,
+        uri: &Uri,
+        text: String,
+        encoding: PositionEncoding,
+    ) -> (Self, Vec<lsp_types::Diagnostic>) {
+        match kind {
+            SourceKind::Circuit => {
+                let analysis = CachedCircuitRecovery::analyze_with_build_index(text);
+                let diagnostics = diagnostic::collect(uri, &analysis, encoding);
+                (Self::Full(analysis), diagnostics)
+            }
+            SourceKind::Functional => {
+                let diagnostics = diagnostic::collect_meta(uri, &text, encoding);
+                (Self::Functional(text), diagnostics)
+            }
+        }
+    }
+
     fn text(&self) -> &str {
         match self {
             Self::Full(analysis) => analysis.text(),
-            Self::Local { text, .. } => text,
+            Self::Local { text, .. } | Self::Functional(text) => text,
         }
     }
 
     fn full(&self) -> Option<&CachedCircuitRecovery> {
         match self {
             Self::Full(analysis) => Some(analysis),
-            Self::Local { .. } => None,
+            Self::Local { .. } | Self::Functional(_) => None,
         }
     }
 }
 
 struct DocumentUpdate {
     uri: Uri,
+    kind: SourceKind,
     encoding: PositionEncoding,
     syntax: Option<Message>,
 }
@@ -108,10 +131,13 @@ pub(super) fn run(input: &mut impl BufRead, output: &mut impl Write) -> io::Resu
                     if let Some(syntax) = change.syntax {
                         syntax.write(output)?;
                     }
-                    if let Some(refresh) = server.refresh_hints(&change.uri) {
-                        refresh.write(output)?;
+                    // 回路の意味解析は .ncg2 だけで構成したプロジェクトを対象とする。
+                    if change.kind == SourceKind::Circuit {
+                        if let Some(refresh) = server.refresh_hints(&change.uri) {
+                            refresh.write(output)?;
+                        }
+                        server.publish_changed(change.encoding, output)?;
                     }
-                    server.publish_changed(change.encoding, output)?;
                 }
             }
             Message::Response(_) => {}
@@ -121,6 +147,12 @@ pub(super) fn run(input: &mut impl BufRead, output: &mut impl Write) -> io::Resu
 }
 
 impl Server {
+    fn circuit_document(&self, uri: &Uri) -> Option<&Document> {
+        self.documents
+            .get(uri)
+            .filter(|doc| doc.kind == SourceKind::Circuit)
+    }
+
     fn request(&mut self, request: Request) -> Message {
         let response = match (self.state, request.method.as_str()) {
             (State::Start, "initialize") => self.initialize(request),
@@ -254,7 +286,7 @@ impl Server {
             }
         };
         let uri = &params.text_document.uri;
-        let (Some(document), Some(encoding)) = (self.documents.get(uri), self.encoding) else {
+        let (Some(document), Some(encoding)) = (self.circuit_document(uri), self.encoding) else {
             return Response::new_ok(request.id, Vec::<lsp_types::InlayHint>::new());
         };
         let open = self
@@ -305,7 +337,7 @@ impl Server {
                 );
             }
         };
-        let (Some(document), Some(encoding)) = (self.documents.get(uri), self.encoding) else {
+        let (Some(document), Some(encoding)) = (self.circuit_document(uri), self.encoding) else {
             return Response::new_ok(request.id, ());
         };
         let open = self
@@ -339,7 +371,7 @@ impl Server {
             }
         };
         let uri = &params.text_document.uri;
-        let (Some(document), Some(encoding)) = (self.documents.get(uri), self.encoding) else {
+        let (Some(document), Some(encoding)) = (self.circuit_document(uri), self.encoding) else {
             return Response::new_ok(request.id, ());
         };
         let open = self
@@ -371,7 +403,7 @@ impl Server {
         };
         let uri = &params.text_document.uri;
         let (Some(document), Some(encoding), Some(palette)) = (
-            self.documents.get(uri),
+            self.circuit_document(uri),
             self.encoding,
             self.semantic_palette.as_ref(),
         ) else {
@@ -405,7 +437,7 @@ impl Server {
             }
         };
         let uri = &params.text_document.uri;
-        let (Some(document), Some(encoding)) = (self.documents.get(uri), self.encoding) else {
+        let (Some(document), Some(encoding)) = (self.circuit_document(uri), self.encoding) else {
             return Response::new_ok(request.id, ());
         };
         let result = symbols::collect(
@@ -439,7 +471,7 @@ impl Server {
                 );
             }
         };
-        let (Some(document), Some(encoding)) = (self.documents.get(uri), self.encoding) else {
+        let (Some(document), Some(encoding)) = (self.circuit_document(uri), self.encoding) else {
             return Response::new_ok(request.id, ());
         };
         let current = document.open_snapshot(uri);
@@ -478,21 +510,29 @@ impl Server {
             (State::Ready, "textDocument/didOpen") => {
                 let params: DidOpenTextDocumentParams = decode(notification.params)?;
                 let item = params.text_document;
-                if item.language_id != "ncg2" || self.documents.contains_key(&item.uri) {
+                let kind = match item.language_id.as_str() {
+                    "ncg2" => SourceKind::Circuit,
+                    "ncg2m" => SourceKind::Functional,
+                    _ => return None,
+                };
+                if self.documents.contains_key(&item.uri) {
                     return None;
                 }
                 let encoding = self.encoding?;
-                let analysis = CachedCircuitRecovery::analyze_with_build_index(item.text);
+                let (analysis, syntax) =
+                    DocumentAnalysis::analyze(kind, &item.uri, item.text, encoding);
                 let mut document = Document {
                     version: item.version,
-                    syntax: diagnostic::collect(&item.uri, &analysis, encoding),
-                    analysis: Some(DocumentAnalysis::Full(analysis)),
+                    kind,
+                    syntax,
+                    analysis: Some(analysis),
                     published: None,
                 };
                 let syntax = document.publish_syntax(&item.uri);
                 self.documents.insert(item.uri.clone(), document);
                 Some(DocumentUpdate {
                     uri: item.uri,
+                    kind,
                     encoding,
                     syntax,
                 })
@@ -512,6 +552,7 @@ impl Server {
                 document.change(&item.uri, item.version, changes, encoding);
                 Some(DocumentUpdate {
                     uri: item.uri.clone(),
+                    kind: document.kind,
                     encoding,
                     syntax: document.publish_syntax(&item.uri),
                 })
@@ -519,9 +560,10 @@ impl Server {
             (State::Ready, "textDocument/didClose") => {
                 let params: DidCloseTextDocumentParams = decode(notification.params)?;
                 let uri = params.text_document.uri;
-                self.documents.remove(&uri)?;
+                let document = self.documents.remove(&uri)?;
                 Some(DocumentUpdate {
                     uri: uri.clone(),
+                    kind: document.kind,
                     encoding: self.encoding?,
                     syntax: Some(diagnostics_notification(uri, None, Vec::new())),
                 })
@@ -541,6 +583,9 @@ impl Server {
         let mut open_documents: Vec<_> = self.documents.iter().collect();
         open_documents.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
         for (uri, document) in open_documents {
+            if document.kind == SourceKind::Functional {
+                continue;
+            }
             let current = document.open_snapshot(uri);
             match sources::select(uri) {
                 Ok(Some(configured)) => {
@@ -633,7 +678,8 @@ fn write_diagnostics(
 
 impl Document {
     fn publish_syntax(&mut self, uri: &Uri) -> Option<Message> {
-        if self.syntax.is_empty()
+        if self.kind == SourceKind::Circuit
+            && self.syntax.is_empty()
             && self
                 .published
                 .as_ref()
@@ -699,7 +745,7 @@ impl Document {
             Some(DocumentAnalysis::Full(old)) => single_edit.and_then(|range| {
                 LocalRecovery::remember(&old, sources::core_revision(previous_version), range)
             }),
-            None => None,
+            Some(DocumentAnalysis::Functional(_)) | None => None,
         };
         if let Some(recovery) = local
             && let Some(syntax) =
@@ -708,9 +754,9 @@ impl Document {
             self.syntax = syntax;
             self.analysis = Some(DocumentAnalysis::Local { text, recovery });
         } else {
-            let analysis = CachedCircuitRecovery::analyze_with_build_index(text);
-            self.syntax = diagnostic::collect(uri, &analysis, encoding);
-            self.analysis = Some(DocumentAnalysis::Full(analysis));
+            let (analysis, syntax) = DocumentAnalysis::analyze(self.kind, uri, text, encoding);
+            self.syntax = syntax;
+            self.analysis = Some(analysis);
         }
     }
 }
@@ -816,6 +862,7 @@ mod tests {
             r#"(using nor)(first "🐈") (test demo (reset) (case)) (using) (x "bad\q") (unfinished"#;
         let analysis = CachedCircuitRecovery::analyze(original.to_owned());
         let mut document = Document {
+            kind: SourceKind::Circuit,
             version: -4,
             syntax: diagnostic::collect(&uri, &analysis, encoding),
             analysis: Some(DocumentAnalysis::Full(analysis)),

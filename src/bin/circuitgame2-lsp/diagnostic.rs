@@ -25,7 +25,9 @@ use serde_json::json;
 use super::sources::SourceSet;
 
 mod local;
+mod meta;
 pub(super) use local::LocalRecovery;
+pub(super) use meta::collect_meta;
 
 #[derive(Clone)]
 struct Report {
@@ -62,7 +64,7 @@ pub(super) fn collect(
             reports
         }
     };
-    render(uri, source, reports, encoding)
+    render(uri, source, reports, encoding, "NCG2")
 }
 
 fn original_reports(list: &OriginalCircuitList) -> impl Iterator<Item = Report> + '_ {
@@ -80,6 +82,7 @@ fn render(
     source: &str,
     mut reports: Vec<Report>,
     encoding: PositionEncoding,
+    source_label: &'static str,
 ) -> Vec<Diagnostic> {
     reports.sort_by_key(|report| (report.span.start, report.span.end));
     let lines = LineIndex::new(source);
@@ -97,7 +100,7 @@ fn render(
             Some(Diagnostic {
                 range,
                 severity: Some(DiagnosticSeverity::ERROR),
-                source: Some("NCG2".to_owned()),
+                source: Some(source_label.to_owned()),
                 code: Some(NumberOrString::String(report.code.to_owned())),
                 message: report.message,
                 related_information,
