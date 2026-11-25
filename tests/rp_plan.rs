@@ -315,3 +315,108 @@ fn rejects_shared_gpio_and_uart_driver_before_writing() {
     assert!(error.contains("同じ回路入力"), "{error}");
     assert_eq!(error.matches("board.toml[").count(), 2);
 }
+
+const SPI_CIRCUIT: &str = include_str!("fixtures/rp-spi/main.ncg2");
+const SPI_PROJECT: &str = include_str!("fixtures/rp-spi/circuitgame2.toml");
+const SPI_BOARD: &str = include_str!("fixtures/rp-spi/board.toml");
+
+#[test]
+fn exports_spi_for_both_boards_in_the_firmware_format() {
+    let directory = tempdir().unwrap();
+    for (board, order) in [("pico2", "lsb-first"), ("pico", "msb-first")] {
+        let settings = SPI_BOARD
+            .replace("pico2", board)
+            .replace("lsb-first", order);
+        let output = plan(directory.path(), SPI_CIRCUIT, SPI_PROJECT, &settings);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut expected = format!(
+            "ncg2-rp-spi-v1\nboard {board}\nperiod-us 1000\nspi 0 2 3 4 5 1000000 3 {order} 20000 1\n"
+        );
+        expected.push_str(
+            "spi-outputs 1 1 1 2 2 2 2 2 2 2 2 1 2 2 1 2 2 2\ninput-spi 1\ninput 6\ninput-spi 0\n",
+        );
+        for index in 2..13 {
+            expected.push_str(&format!("input-spi {index}\n"));
+        }
+        expected.push_str(
+            "gate 1 1\ngate 14 14\ngate 18 18\ngate 19 19\nport 15\nport 16\nport 17\nport 7\noutput 3 7 0\n",
+        );
+        assert_eq!(output.stdout, expected.as_bytes());
+    }
+}
+
+#[test]
+fn spi_reports_precise_setting_ranges_and_related_locations() {
+    let directory = tempdir().unwrap();
+    let cases = [
+        ("mode = 3", "mode = 4", "4", "SPI のモード", None),
+        (
+            "frequency-hz = 1000000",
+            "frequency-hz = 2000",
+            "2000",
+            "2307〜75000000 Hz",
+            None,
+        ),
+        (
+            "cs-pin = 5",
+            "cs-pin = 7",
+            "7",
+            "GP7 を複数",
+            Some("先に指定した接続"),
+        ),
+        (
+            "request-ready = \"request-ready\"",
+            "request-ready = \"button-signal\"",
+            "\"button-signal\"",
+            "ポートの方向が逆",
+            Some("回路側のポート"),
+        ),
+    ];
+    for (original, replacement, token, reason, related) in cases {
+        let board = format!("# 配線の確認\n{}", SPI_BOARD.replace(original, replacement));
+        let start = board.find(replacement).unwrap() + replacement.rfind(token).unwrap();
+        let output = plan(directory.path(), SPI_CIRCUIT, SPI_PROJECT, &board);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let message = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            message.contains(&format!("board.toml[{start}..{}]", start + token.len())),
+            "{message}"
+        );
+        assert!(message.contains(reason), "{message}");
+        if let Some(related) = related {
+            assert!(message.contains(related), "{message}");
+        }
+    }
+}
+
+#[test]
+fn spi_rejects_other_peripheral_tables_with_both_locations() {
+    let directory = tempdir().unwrap();
+    let (_, i2c) = i2c_fixture();
+    let uart = &UART_BOARD[UART_BOARD.find("[uart]").unwrap()..];
+    let i2c = &i2c[i2c.find("[i2c]").unwrap()..];
+    let board = format!("{SPI_BOARD}\n{i2c}\n{uart}");
+    let first = board.find("[spi]").unwrap();
+    let second = board.find("[i2c]").unwrap();
+    let output = plan(directory.path(), SPI_CIRCUIT, SPI_PROJECT, &board);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let message = String::from_utf8(output.stderr).unwrap();
+    let mut lines = message.lines();
+    let later = lines.next().unwrap();
+    let earlier = lines.next().unwrap();
+    assert!(
+        later.contains(&format!("board.toml[{second}..")),
+        "{message}"
+    );
+    assert!(later.contains("SPI と I²C"), "{message}");
+    assert!(
+        earlier.contains(&format!("board.toml[{first}..")),
+        "{message}"
+    );
+}

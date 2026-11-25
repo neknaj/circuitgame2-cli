@@ -194,7 +194,7 @@ ncg2 run --project examples/vram/circuitgame2.toml --vram screen --input 1101 --
 ncg2 rp-plan --project circuitgame2.toml --board board.toml
 ```
 
-Pico または Pico 2 向けに回路と端子の割り当てを検査し、配線表を標準出力へ書く。対象は単一ビットの入出力を持つ順序 NOR 回路。`tick-ns` は正の整数マイクロ秒で表す。各回路入力には GPIO、UART、I²C のいずれかの信号を一つ割り当てる。 [GPIO の設定とビルドの例](https://github.com/neknaj/circuitgame2/tree/main/examples/rp-gpio)
+Pico または Pico 2 向けに回路と端子の割り当てを検査し、配線表を標準出力へ書く。対象は単一ビットの入出力を持つ順序 NOR 回路。`tick-ns` は正の整数マイクロ秒で表す。各回路入力には GPIO、UART、I²C、SPI のいずれかの信号を一つ割り当てる。1つの配線表で GPIO と併用できる周辺機能は UART、I²C、SPI のうち1種類。 [GPIO の設定とビルドの例](https://github.com/neknaj/circuitgame2/tree/main/examples/rp-gpio)
 
 UART を使う場合は `board.toml` に `[uart]` を追加する。各ポート名をルート回路の宣言に合わせ、データのビットは最下位から並べる。
 
@@ -219,7 +219,7 @@ tx-done-ready = "tx-done-ready"
 
 生成した UART 配線表を使う場合は、ファームウェアのビルドに `uart` feature を追加する。 [RP ファームウェアのビルドと信号の扱い](https://github.com/neknaj/circuitgame2-core/tree/main/firmware/rp)
 
-I²C を使う場合は `board.toml` に `[i2c]` を追加する。同じ配線表で選べる周辺機能は UART または I²C の一方で、GPIO は併用できる。`instance` に `0` または `1`、`sda-pin` と `scl-pin` に GP 番号、`frequency-hz` に `100000` または `400000`、`timeout-micros` に正の整数を指定する。
+I²C を使う場合は `board.toml` に `[i2c]` を追加する。`instance` に `0` または `1`、`sda-pin` と `scl-pin` に GP 番号、`frequency-hz` に `100000` または `400000`、`timeout-micros` に正の整数を指定する。
 
 | 回路から見た方向 | 単一ビットのポート | ポート名の配列 |
 | --- | --- | --- |
@@ -227,6 +227,25 @@ I²C を使う場合は `board.toml` に `[i2c]` を追加する。同じ配線�
 | 出力 | `request-valid`、`response-ready` | `address`（7個）、`write-length` と `read-length`（各8個）、`write-data` |
 
 整数のビットは最下位から並べる。`read-data` と `write-data` の容量は同じにし、1〜255 バイト分のポート名を指定する。データのポート名は先頭バイトから並べ、各バイトも最下位ビットから指定する。 [RP バックエンドの信号と tick の規則](https://neknaj.github.io/circuitgame2/docs/backends.html)
+
+### SPI の折り返し
+
+SPI の折り返し例は ncg2 のルートリポジトリにある。`examples/rp-spi-loopback` に移動して次のコマンドを実行すると、`ncg2-rp-spi-v1` から始まる配線表が得られる。Pico 用の配線表を作る場合は、例題の `board.toml` の `board` を `"pico"` に変える。 [SPI の折り返し例](https://github.com/neknaj/circuitgame2/tree/main/examples/rp-spi-loopback)
+
+```sh
+ncg2 rp-plan --project circuitgame2.toml --board board.toml
+```
+
+`[spi]` の `instance` に `0` または `1` を指定する。`sck-pin` はクロック出力、`mosi-pin` はデータ出力、`miso-pin` はデータ入力、`cs-pin` は選択時に Low を出す GPIO。通信条件は `frequency-hz` に要求周波数、`mode` に 0〜3、`bit-order` に `"msb-first"` または `"lsb-first"`、`timeout-micros` に正の待ち時間を指定する。
+
+| 回路から見た方向 | 単一ビットのポート | ポート名の配列 |
+| --- | --- | --- |
+| 入力 | `request-ready`、`response-valid` | `response-status`（3個）、`read-data` |
+| 出力 | `request-valid`、`response-ready` | `length`（8個）、`write-data` |
+
+`length` は送受信に共通のバイト数を表す。`read-data` と `write-data` には同じ容量の1〜255 バイト分を指定する。回路側では各バイトのポート名を最下位ビットから並べる。`bit-order` が選ぶのは SPI で送受信する各バイトの線上の順序である。
+
+配線表を使うファームウェアのビルドには `spi` feature を追加する。 [RP ファームウェアのビルド手順](https://github.com/neknaj/circuitgame2-core/tree/main/firmware/rp)
 
 ## NOR ゲート数を調べる
 
