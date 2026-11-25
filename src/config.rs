@@ -94,6 +94,15 @@ pub fn read(path: &Path) -> Result<ProjectConfig, String> {
 ///
 /// ファイルが読めない場合、設定の形式に違反がある場合、またはソース一覧が空の場合に失敗する。
 pub fn read_settings(path: &Path) -> Result<ProjectConfig, String> {
+    read_settings_snapshot(path).map(|(settings, _)| settings)
+}
+
+/// 設定の検査結果と、解析に使った元のファイル内容を返す。
+///
+/// # Errors
+///
+/// 読み取りや検査に失敗した場合は診断を返す。設定中の違反には位置も付ける。
+pub fn read_settings_snapshot(path: &Path) -> Result<(ProjectConfig, Vec<u8>), String> {
     let bytes = fs::read(path)
         .map_err(|error| at(path, None, &format!("設定を読み込めない ({error})。")))?;
     let source = std::str::from_utf8(&bytes).map_err(|error| {
@@ -115,5 +124,5 @@ pub fn read_settings(path: &Path) -> Result<ProjectConfig, String> {
             "sources にソースを1件以上指定する。",
         ));
     }
-    Ok(config)
+    Ok((config, bytes))
 }

@@ -30,32 +30,89 @@ struct Source<'a> {
     uri: Uri,
     text: Cow<'a, str>,
     revision: u64,
+    origin: SourceOrigin,
+}
+
+enum SourceOrigin {
+    Editor(Option<PathBuf>),
+    Disk(PathBuf),
 }
 
 /// 一つのプロジェクトの解析に使うソース集合。
 pub(super) struct SourceSet<'a> {
     sources: Vec<Source<'a>>,
+    project: Option<ProjectKey>,
 }
 
 pub(super) type SourcePaths = Vec<(String, PathBuf)>;
-pub(super) type ProjectKey = (PathBuf, Vec<String>);
+pub(super) const STANDALONE_ID: &str = "document.ncg2";
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct ProjectKey {
+    root: PathBuf,
+    ids: Vec<String>,
+    settings: Vec<u8>,
+}
 
 pub(super) struct ConfiguredSources {
     id: String,
     paths: SourcePaths,
     root: PathBuf,
+    settings: Vec<u8>,
 }
 
 impl ConfiguredSources {
     /// Windows の設定ルートは実体でそろえ、プロジェクト内の仮想 ID は設定の綴りを使う。
     pub(super) fn for_diagnostics(self) -> (ProjectKey, String, SourcePaths) {
-        #[cfg(windows)]
-        let root = fs::canonicalize(&self.root).unwrap_or(self.root);
-        #[cfg(not(windows))]
-        let root = self.root;
-        let names = self.paths.iter().map(|(id, _)| id.clone()).collect();
-        ((root, names), self.id, self.paths)
+        let project = self.project_key();
+        (project, self.id, self.paths)
     }
+
+    fn project_key(&self) -> ProjectKey {
+        ProjectKey {
+            root: project_root(&self.root),
+            ids: self.paths.iter().map(|(id, _)| id.clone()).collect(),
+            settings: self.settings.clone(),
+        }
+    }
+}
+
+impl ProjectKey {
+    fn matches_document(&self, uri: &Uri, id: &str) -> bool {
+        let Some(file) = file_path(uri) else {
+            return false;
+        };
+        let Some(parent) = file.parent() else {
+            return false;
+        };
+        let Ok(Some((root, _))) = nearest_manifest(parent) else {
+            return false;
+        };
+        if project_root(root) != self.root {
+            return false;
+        }
+        if root.join(id) == file {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            let paths: SourcePaths = self
+                .ids
+                .iter()
+                .map(|id| (id.clone(), root.join(id)))
+                .collect();
+            windows_source_id(&file, &paths).as_deref() == Some(id)
+        }
+        #[cfg(not(windows))]
+        false
+    }
+}
+
+fn project_root(root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if let Ok(path) = fs::canonicalize(root) {
+        return path;
+    }
+    root.to_path_buf()
 }
 
 /// 設定を読み、問い合わせ元の ID とプロジェクトのソースを選ぶ。
@@ -76,32 +133,39 @@ impl<'a> SourceSet<'a> {
         current: OpenDocument<'a>,
         open: impl Iterator<Item = OpenDocument<'a>>,
     ) -> Result<(String, Self), String> {
-        let (current_id, sources) = match select(current.uri)? {
+        match select(current.uri)? {
             Some(configured) => {
+                let project = Some(configured.project_key());
                 let sources =
                     load_sources(configured.paths, [(configured.id.as_str(), current)], open)?;
-                (configured.id, sources)
+                Ok((configured.id, Self { sources, project }))
             }
-            None => standalone(&current)?,
-        };
-        Ok((current_id, Self { sources }))
+            None => Ok((STANDALONE_ID.into(), Self::single(current)?)),
+        }
     }
 
     /// 同じ設定を使う開いた文書の版を、一つのソース集合に固定する。
     pub(super) fn load_group(
+        project: ProjectKey,
         paths: SourcePaths,
         documents: &[(String, OpenDocument<'a>)],
         open: impl Iterator<Item = OpenDocument<'a>>,
     ) -> Result<Self, String> {
         let overrides = documents.iter().map(|(id, doc)| (id.as_str(), *doc));
         let sources = load_sources(paths, overrides, open)?;
-        Ok(Self { sources })
+        Ok(Self {
+            sources,
+            project: Some(project),
+        })
     }
 
     /// 設定に属さない文書の本文を使って、一つのソース集合を作る。
     pub(super) fn single(current: OpenDocument<'a>) -> Result<Self, String> {
-        let (_, sources) = standalone(&current)?;
-        Ok(Self { sources })
+        let sources = vec![opened(STANDALONE_ID.into(), &current)?];
+        Ok(Self {
+            sources,
+            project: None,
+        })
     }
 
     /// Core に渡す本文と版を、識別子に対応させる。
@@ -114,6 +178,54 @@ impl<'a> SourceSet<'a> {
                 revision: source.revision,
             })
             .collect()
+    }
+
+    /// 応答を公開する直前に、設定の選択とディスクから読んだ本文を照合する。
+    pub(super) fn still_current<'u>(
+        &self,
+        members: impl IntoIterator<Item = (&'u Uri, &'u str)>,
+    ) -> bool {
+        let sources_match = self.sources.iter().all(|source| match &source.origin {
+            SourceOrigin::Disk(path) => {
+                fs::read(path).is_ok_and(|bytes| bytes == source.text.as_bytes())
+            }
+            SourceOrigin::Editor(None) => true,
+            SourceOrigin::Editor(Some(path)) => self.editor_source_matches(source, path),
+        });
+        if !sources_match {
+            return false;
+        }
+        match &self.project {
+            Some(project) => {
+                fs::read(project.root.join("circuitgame2.toml"))
+                    .is_ok_and(|bytes| bytes == project.settings)
+                    && members
+                        .into_iter()
+                        .all(|(uri, id)| project.matches_document(uri, id))
+            }
+            None => members.into_iter().all(|(uri, id)| {
+                id == STANDALONE_ID && select(uri).is_ok_and(|selected| selected.is_none())
+            }),
+        }
+    }
+
+    fn editor_source_matches(&self, source: &Source<'_>, host: &Path) -> bool {
+        let Some(file) = file_path(&source.uri) else {
+            return false;
+        };
+        if file == host {
+            return true;
+        }
+        #[cfg(windows)]
+        if let Some(project) = &self.project {
+            let paths: SourcePaths = project
+                .ids
+                .iter()
+                .map(|id| (id.clone(), project.root.join(id)))
+                .collect();
+            return windows_source_id(&file, &paths).as_deref() == Some(source.id.as_str());
+        }
+        false
     }
 
     /// Core が指す範囲を、そのソースと版の本文から LSP の位置に変換する。
@@ -174,7 +286,11 @@ fn load_sources<'a, 'id>(
     paths
         .into_iter()
         .map(|(id, path)| match overlays.get(&path) {
-            Some(Some(doc)) => opened(id, doc),
+            Some(Some(doc)) => {
+                let mut source = opened(id, doc)?;
+                source.origin = SourceOrigin::Editor(Some(path));
+                Ok(source)
+            }
             Some(None) => Err(format!("{} に開いている本文が複数ある。", path.display())),
             None => on_disk(id, &path),
         })
@@ -232,11 +348,6 @@ fn from_file(project_source: &ProjectSource<'_>, id: &str) -> bool {
     project_source.id.same_file(&id)
 }
 
-fn standalone<'a>(doc: &OpenDocument<'a>) -> Result<(String, Vec<Source<'a>>), String> {
-    let id = "document.ncg2";
-    Ok((id.into(), vec![opened(id.into(), doc)?]))
-}
-
 fn opened<'a>(id: String, doc: &OpenDocument<'a>) -> Result<Source<'a>, String> {
     let text = doc
         .text
@@ -248,6 +359,7 @@ fn opened<'a>(id: String, doc: &OpenDocument<'a>) -> Result<Source<'a>, String> 
         uri: doc.uri.clone(),
         text: Cow::Borrowed(text),
         revision,
+        origin: SourceOrigin::Editor(None),
     })
 }
 
@@ -264,6 +376,7 @@ fn on_disk<'a>(id: String, path: &Path) -> Result<Source<'a>, String> {
         uri,
         text: Cow::Owned(text),
         revision: 0,
+        origin: SourceOrigin::Disk(path.to_path_buf()),
     })
 }
 
@@ -283,7 +396,7 @@ fn configured_sources(file: &Path) -> Result<Option<ConfiguredSources>, String> 
     let Some((root, manifest)) = nearest_manifest(parent)? else {
         return Ok(None);
     };
-    let settings = config::read_settings(&manifest)?;
+    let (settings, settings_bytes) = config::read_settings_snapshot(&manifest)?;
     let mut seen = BTreeSet::new();
     let mut paths = Vec::new();
     let mut current_id = None;
@@ -330,6 +443,7 @@ fn configured_sources(file: &Path) -> Result<Option<ConfiguredSources>, String> 
         id,
         paths,
         root: root.to_path_buf(),
+        settings: settings_bytes,
     }))
 }
 
@@ -359,4 +473,68 @@ fn nearest_manifest(parent: &Path) -> Result<Option<(&Path, PathBuf)>, String> {
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn rejects_a_snapshot_after_disk_source_or_settings_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "ncg2-snapshot-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::create_dir(&root).unwrap();
+        let settings = root.join("circuitgame2.toml");
+        let basis = root.join("basis.ncg2");
+        let source = root.join("main.ncg2");
+        struct Files {
+            root: PathBuf,
+            entries: [PathBuf; 3],
+        }
+        impl Drop for Files {
+            fn drop(&mut self) {
+                for path in &self.entries {
+                    let _ = fs::remove_file(path);
+                }
+                let _ = fs::remove_dir(&self.root);
+            }
+        }
+        let _fixture = Files {
+            root,
+            entries: [settings.clone(), basis.clone(), source.clone()],
+        };
+        let config = "sources = [\"basis.ncg2\", \"main.ncg2\"]\n";
+        fs::write(&settings, config).unwrap();
+        fs::write(&basis, "(using nor)").unwrap();
+        fs::write(&source, "ディスク上の本文").unwrap();
+        let uri = Url::from_file_path(&source)
+            .unwrap()
+            .as_str()
+            .parse()
+            .unwrap();
+        let open = OpenDocument {
+            uri: &uri,
+            text: Some("開いている本文"),
+            version: 1,
+        };
+        let (_, loaded) = SourceSet::load(open, [open].into_iter()).unwrap();
+        let members = [(&uri, "main.ncg2")];
+        assert!(loaded.still_current(members));
+        assert!(!loaded.still_current([(&uri, "basis.ncg2")]));
+        fs::write(&source, "開いている間に変わったディスクの本文").unwrap();
+        assert!(loaded.still_current(members));
+        fs::write(&basis, "(using xor)").unwrap();
+        assert!(!loaded.still_current(members));
+        fs::write(&basis, "(using nor)").unwrap();
+        assert!(loaded.still_current(members));
+        fs::write(&settings, format!("{config}# 設定を編集した\n")).unwrap();
+        assert!(!loaded.still_current(members));
+    }
 }

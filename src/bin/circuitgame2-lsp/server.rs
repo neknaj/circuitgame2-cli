@@ -2,7 +2,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     io::{self, BufRead, Write},
     process::ExitCode,
 };
@@ -18,7 +18,7 @@ use lsp_types::{
 
 use super::{
     definition, diagnostic,
-    sources::{self, OpenDocument, ProjectKey, SourcePaths, SourceSet},
+    sources::{self, OpenDocument, ProjectKey, STANDALONE_ID, SourcePaths, SourceSet},
 };
 
 #[derive(Clone, Copy, Default)]
@@ -67,9 +67,7 @@ pub(super) fn run(input: &mut impl BufRead, output: &mut impl Write) -> io::Resu
                     if let Some(syntax) = change.syntax {
                         syntax.write(output)?;
                     }
-                    for message in server.publish_changed(change.encoding) {
-                        message.write(output)?;
-                    }
+                    server.publish_changed(change.encoding, output)?;
                 }
             }
             Message::Response(_) => {}
@@ -251,69 +249,99 @@ impl Server {
         }
     }
 
-    fn publish_changed(&mut self, encoding: PositionEncoding) -> Vec<Message> {
+    fn publish_changed(
+        &mut self,
+        encoding: PositionEncoding,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
         let mut groups =
             BTreeMap::<ProjectKey, (SourcePaths, Vec<(String, OpenDocument<'_>)>)>::new();
-        let mut reports = HashMap::new();
+        let mut published = Vec::new();
         let mut open_documents: Vec<_> = self.documents.iter().collect();
         open_documents.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
         for (uri, document) in open_documents {
-            reports.insert(uri.clone(), document.syntax.clone());
             let current = document.open_snapshot(uri);
             match sources::select(uri) {
                 Ok(Some(configured)) => {
                     let (project, id, paths) = configured.for_diagnostics();
-                    let group = groups.entry(project).or_insert_with(|| (paths, Vec::new()));
-                    group.1.push((id, current));
+                    groups
+                        .entry(project)
+                        .or_insert_with(|| (paths, Vec::new()))
+                        .1
+                        .push((id, current));
                 }
-                Ok(None) if document.syntax.is_empty() => {
-                    if let Ok(snapshot) = SourceSet::single(current) {
-                        for (uri, item) in diagnostic::collect_references(&snapshot, encoding) {
-                            reports.get_mut(&uri).unwrap().push(item);
+                selection => {
+                    let mut diagnostics = document.syntax.clone();
+                    if selection.is_ok()
+                        && diagnostics.is_empty()
+                        && let Ok(snapshot) = SourceSet::single(current)
+                    {
+                        let references = diagnostic::collect_references(&snapshot, encoding);
+                        if snapshot.still_current([(uri, STANDALONE_ID)]) {
+                            diagnostics.extend(references.into_iter().map(|(_, item)| item));
                         }
                     }
+                    write_diagnostics(uri, document, diagnostics, &mut published, output)?;
                 }
-                _ => {}
             }
         }
-        for (paths, documents) in groups.into_values() {
+        for (project, (paths, documents)) in groups {
             let open = self
                 .documents
                 .iter()
                 .map(|(uri, doc)| doc.open_snapshot(uri));
-            // 同じ設定の文書には、一つの解析で確定した診断を配る。
-            let Ok(snapshot) = SourceSet::load_group(paths, &documents, open) else {
-                continue;
-            };
-            let members: HashSet<_> = documents.iter().map(|(_, doc)| doc.uri).collect();
-            for (uri, item) in diagnostic::collect_references(&snapshot, encoding) {
-                if members.contains(&uri) {
-                    reports.get_mut(&uri).unwrap().push(item);
-                }
-            }
-        }
-        let mut updates: Vec<_> = reports
-            .into_iter()
-            .filter_map(|(uri, diagnostics)| {
-                let document = &self.documents[&uri];
-                if let Some((version, previous)) = &document.published {
-                    if *version == document.version && *previous == diagnostics {
-                        return None;
+            let mut reports: HashMap<_, _> = documents
+                .iter()
+                .map(|(_, doc)| (doc.uri.clone(), self.documents[doc.uri].syntax.clone()))
+                .collect();
+            // 次のプロジェクトの解析を始める前に、照合した診断を送る。
+            if let Ok(snapshot) = SourceSet::load_group(project, paths, &documents, open) {
+                let references = diagnostic::collect_references(&snapshot, encoding);
+                let members = documents.iter().map(|(id, doc)| (doc.uri, id.as_str()));
+                if snapshot.still_current(members) {
+                    for (uri, item) in references {
+                        if let Some(diagnostics) = reports.get_mut(&uri) {
+                            diagnostics.push(item);
+                        }
                     }
                 }
-                Some((uri, document.version, diagnostics))
-            })
-            .collect();
-        updates.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
-        updates
-            .into_iter()
-            .map(|(uri, version, diagnostics)| {
-                let document = self.documents.get_mut(&uri).unwrap();
-                document.published = Some((version, diagnostics.clone()));
-                diagnostics_notification(uri, Some(version), diagnostics)
-            })
-            .collect()
+            }
+            for (_, doc) in documents {
+                let diagnostics = reports.remove(doc.uri).unwrap();
+                write_diagnostics(
+                    doc.uri,
+                    &self.documents[doc.uri],
+                    diagnostics,
+                    &mut published,
+                    output,
+                )?;
+            }
+        }
+        for (uri, version, diagnostics) in published {
+            self.documents.get_mut(&uri).unwrap().published = Some((version, diagnostics));
+        }
+        Ok(())
     }
+}
+
+fn write_diagnostics(
+    uri: &Uri,
+    document: &Document,
+    diagnostics: Vec<lsp_types::Diagnostic>,
+    published: &mut Vec<(Uri, i32, Vec<lsp_types::Diagnostic>)>,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    let version = document.version;
+    if document
+        .published
+        .as_ref()
+        .is_some_and(|(old_version, previous)| *old_version == version && *previous == diagnostics)
+    {
+        return Ok(());
+    }
+    diagnostics_notification(uri.clone(), Some(version), diagnostics.clone()).write(output)?;
+    published.push((uri.clone(), version, diagnostics));
+    Ok(())
 }
 
 impl Document {

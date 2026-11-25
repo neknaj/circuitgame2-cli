@@ -35,10 +35,11 @@ pub(super) fn locate<'a>(
     let Ok(project) = parse_circuit_project(&snapshots) else {
         return Ok(None);
     };
-    let current = normalize_path(&current_id)
+    let current_path = normalize_path(&current_id)
         .map_err(|_| format!("{current_id} の仮想パスを解釈できない。"))?;
-    let target = resolved_location(&project, &current, offset);
-    Ok(target.and_then(|location| sources.location(location, encoding)))
+    let target = resolved_location(&project, &current_path, offset);
+    let result = target.and_then(|location| sources.location(location, encoding));
+    Ok(result.filter(|_| sources.still_current([(current.uri, current_id.as_str())])))
 }
 
 fn resolved_location<'p, 'a>(
