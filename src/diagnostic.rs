@@ -13,7 +13,7 @@ use circuitgame2_core::{
         AbsoluteTarget, AliasConflict, AliasDisposition, BitFuncError, CircuitBasisError,
         CircuitProject, CircuitProjectError, DefinitionAnalysisError, DefinitionBatchError,
         DefinitionReferenceReason, ExpandFunctionsError, ExportError, FunctionBuildDiagnostic,
-        FunctionExpansionError, LocatedName, ResolvedUse, UseAliasReport, UseTargetError,
+        FunctionExpansionError, LocatedName, ResolvedUse, UseTargetError,
     },
     syntax::circuit::CircuitFormError,
 };
@@ -139,12 +139,12 @@ where
 }
 
 pub(super) fn alias_warnings(
-    report: &UseAliasReport<'_, '_>,
+    directives: &[ResolvedUse<'_, '_>],
+    dispositions: &[AliasDisposition],
     contextualize: impl Fn(String) -> String,
 ) {
-    let directives = report.targets.directives();
     let mut stderr = io::stderr().lock();
-    for (alias, disposition) in directives.iter().zip(&report.dispositions) {
+    for (alias, disposition) in directives.iter().zip(dispositions) {
         if let AliasDisposition::Duplicate { first } = disposition
             && let Some(first) = directives.get(*first)
         {
@@ -158,7 +158,7 @@ pub(super) fn alias_warnings(
     }
 }
 
-fn reference_error(error: DefinitionBatchError<'_, '_>) -> String {
+pub(super) fn reference_error(error: DefinitionBatchError<'_, '_>) -> String {
     let at = position(
         &error.site.source.id.components().join("/"),
         &error.site.name.span,
@@ -198,11 +198,7 @@ pub(super) fn reference_reason(
     }
 }
 
-pub(super) fn analysis_error(
-    error: DefinitionAnalysisError<'_, '_>,
-    contextualize: impl Fn(String) -> String,
-    print_warnings: bool,
-) -> String {
+pub(super) fn analysis_error(error: DefinitionAnalysisError<'_, '_>) -> String {
     match error {
         DefinitionAnalysisError::Basis(CircuitBasisError::Missing) => {
             "(using nor) を一つ指定する。".into()
@@ -213,12 +209,7 @@ pub(super) fn analysis_error(
             located(&first),
         ),
         DefinitionAnalysisError::Alias(conflict) => alias_error(conflict),
-        DefinitionAnalysisError::Definition { error, aliases } => {
-            if print_warnings {
-                alias_warnings(&aliases, contextualize);
-            }
-            reference_error(error)
-        }
+        DefinitionAnalysisError::Definition { error, .. } => reference_error(error),
         DefinitionAnalysisError::UseTarget(error) => match error {
             UseTargetError::Export(ExportError::Conflict(conflict)) => format!(
                 "{} 宣言名が衝突する ({:?})。\n  先の宣言 {}",

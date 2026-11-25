@@ -3,10 +3,10 @@
 use circuitgame2_cli::CLOCKED_LIMITS;
 use circuitgame2_core::{
     project::{
-        CircuitProject, FuncArityError, FuncAtomTypeError, FuncDriverError, FuncLiteralError,
-        FuncSignalReason, FuncSignalTypeError, FuncWiringError, FuncWiringResult,
-        FunctionExpansionError, LocatedName, ModuleBodyPosition, ModuleCallInputsError,
-        ModuleCallsError, ModuleOutputTypesError, UseAliases,
+        CheckedDefinitionAnalysis, CircuitProject, FuncArityError, FuncAtomTypeError,
+        FuncDriverError, FuncLiteralError, FuncSignalReason, FuncSignalTypeError, FuncWiringError,
+        FuncWiringResult, FunctionExpansionError, LocatedName, ModuleBodyPosition,
+        ModuleCallInputsError, ModuleCallsError, ModuleOutputTypesError,
     },
     syntax::circuit::Head,
 };
@@ -16,9 +16,10 @@ use super::{check_report::Report, diagnostic};
 /// ソースとフォームの順に本体を調べ、最初に見つけた違反を返す。
 pub(super) fn check<'p, 'a>(
     project: &'p CircuitProject<'a>,
-    aliases: &UseAliases<'_, 'p, 'a>,
+    checked: &CheckedDefinitionAnalysis<'_, 'p, 'a>,
     report: &mut Option<&mut Report<'_>>,
 ) -> Result<(), String> {
+    let aliases = checked.aliases();
     for (file, (source, circuit)) in project.sources().iter().zip(project.circuits()).enumerate() {
         for (entry, item) in circuit.syntax.entries.iter().enumerate() {
             let name = match item.head {
@@ -91,8 +92,8 @@ pub(super) fn check<'p, 'a>(
             }
         }
     }
-    aliases.prepare_function_expansion().map_err(|error| {
-        if let (Some(report), FunctionExpansionError::Cycle(sites)) = (report, &error)
+    checked.function_expansion_order().map_err(|sites| {
+        if let Some(report) = report
             && let Some((first, rest)) = sites.split_first()
         {
             report.body_error(
@@ -101,7 +102,7 @@ pub(super) fn check<'p, 'a>(
                 rest.iter().map(|site| &site.location),
             );
         }
-        diagnostic::function_expansion_error(error)
+        diagnostic::function_expansion_error(FunctionExpansionError::Cycle(sites))
     })?;
     Ok(())
 }
