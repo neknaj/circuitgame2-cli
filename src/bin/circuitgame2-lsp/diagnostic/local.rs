@@ -27,39 +27,26 @@ impl LocalRecovery {
         edit: Range<usize>,
     ) -> Option<Self> {
         // 回路診断の採用条件が同じ場合に前後の診断を再利用する。
-        let CircuitRecovery::WithSyntaxRepairs {
-            recovered,
-            original,
-        } = old.recovery()
-        else {
+        let CircuitRecovery::WithSyntaxRepairs { original, .. } = old.recovery() else {
             return None;
         };
-        let lists = &recovered.original_lists;
-        let head_count = lists.partition_point(|span| span.end <= edit.start);
-        let start = lists[..head_count].last().map_or(0, |span| span.end);
-        let old_join = if edit.end == start {
-            start
-        } else {
-            lists
-                .get(lists.partition_point(|span| span.end < edit.end))?
-                .end
-        };
-        let first_tail = lists.partition_point(|span| span.start < old_join);
-        let cache =
-            OwnedRecoveryCache::remember(old.text().to_owned(), revision, start, old_join).ok()?;
-        let head = original[..head_count]
+        let window = old.recovery_reuse_window(edit)?;
+        let cache = OwnedRecoveryCache::remember(
+            old.text().to_owned(), revision, window.start, window.join,
+        ).ok()?;
+        let head = original[..window.head_count]
             .iter()
             .flatten()
             .flat_map(original_reports)
             .collect();
-        let tail = original[first_tail..]
+        let tail = original[window.first_tail..]
             .iter()
             .flatten()
             .flat_map(original_reports)
             .collect();
         Some(Self {
             cache,
-            old_join,
+            old_join: window.join,
             head,
             tail,
         })
