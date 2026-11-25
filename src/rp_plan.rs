@@ -7,7 +7,8 @@ use circuitgame2_core::time::exact_microseconds;
 use circuitgame2_core::{
     backend::rp::{
         AssignmentError, Board, GpioBinding, GpioCircuitImage, GpioImageError, GpioOutputPin,
-        RpInputSource, UartCircuitImage, UartImageError, UartInputSignal, UartPortNames, UartSetup,
+        PinSite, RpInputSource, UartCircuitImage, UartImageError, UartInputSignal, UartPortNames,
+        UartSetup,
     },
     netlist::PackedNorLayout32,
     project::{
@@ -17,6 +18,8 @@ use circuitgame2_core::{
 };
 use serde::Deserialize;
 use toml::Spanned;
+
+mod i2c;
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -127,6 +130,7 @@ struct Wiring {
     #[serde(default)]
     gpio: Vec<Spanned<Gpio>>,
     uart: Option<Spanned<Uart>>,
+    i2c: Option<Spanned<i2c::I2c>>,
 }
 
 fn read_board(path: &Path) -> Result<Wiring, String> {
@@ -178,27 +182,43 @@ fn image_error(
     board: &Path,
     wiring: &Wiring,
     source: &Source<'_, '_>,
+    i2c: Option<&i2c::Locations<'_>>,
 ) -> String {
-    let at = |index, reason: &str| config::at(board, span(wiring, index), reason);
+    let request_span = |index| match i2c {
+        Some(locations) if index >= wiring.gpio.len() => {
+            locations.request(index - wiring.gpio.len())
+        }
+        _ => span(wiring, index),
+    };
+    let pin_span = |site: PinSite| match i2c {
+        Some(locations) if site.assignment == wiring.gpio.len() => locations.pin(site.signal),
+        _ => span(wiring, site.assignment),
+    };
+    let at = |index, reason: &str| config::at(board, request_span(index), reason);
     let related = |index| at(index, "先に指定した接続。");
     match error {
         GpioImageError::Pin(AssignmentError::DuplicatePin { first, site, pin }) => format!(
             "{}\n{}",
-            at(
-                site.assignment,
+            config::at(
+                board,
+                pin_span(site),
                 &format!("GP{pin} を複数の接続で使用している。")
             ),
-            related(first.assignment)
+            config::at(board, pin_span(first), "先に指定した接続。")
         ),
-        GpioImageError::Pin(AssignmentError::UnexposedPin { site, pin }) => at(
-            site.assignment,
+        GpioImageError::Pin(AssignmentError::UnexposedPin { site, pin }) => config::at(
+            board,
+            pin_span(site),
             &format!("GP{pin} はボードの外部端子に出ていない。"),
         ),
-        GpioImageError::Pin(_) => config::at(
-            board,
-            wiring.uart.as_ref().map(Spanned::span),
-            "ボードのピンまたは周辺機能の割り当てに違反している。",
-        ),
+        GpioImageError::Pin(error) => match i2c {
+            Some(locations) => i2c::assignment_error(error, board, locations),
+            None => config::at(
+                board,
+                wiring.uart.as_ref().map(Spanned::span),
+                "ボードのピンまたは周辺機能の割り当てに違反している。",
+            ),
+        },
         GpioImageError::Binding(DeviceBindingsError::DuplicateDriver { first, later }) => format!(
             "{}\n{}",
             at(later, "同じ回路入力を複数の接続が駆動している。"),
@@ -214,17 +234,27 @@ fn image_error(
                     &format!("回路側のポート {}", super::diagnostic::located(&port.name))
                 ),
             ),
-            DevicePortBindingError::TypeMismatch { actual, .. } => format!(
-                "{}\n{}",
-                at(request, "RP の接続先には単一ビットの回路ポートを指定する。"),
-                config::source_diagnostic(
-                    source.settings_path,
-                    &format!(
-                        "回路側のポート {}",
-                        super::diagnostic::located(&actual.name)
+            DevicePortBindingError::TypeMismatch { actual, .. } => {
+                let reason = if i2c.is_some() {
+                    format!(
+                        "RP の接続先には単一ビットが必要だが、指定したポートの型は {}。",
+                        super::diagnostic::clocked::port_type(actual.ty)
                     )
-                ),
-            ),
+                } else {
+                    "RP の接続先には単一ビットの回路ポートを指定する。".into()
+                };
+                format!(
+                    "{}\n{}",
+                    at(request, &reason),
+                    config::source_diagnostic(
+                        source.settings_path,
+                        &format!(
+                            "回路側のポート {}",
+                            super::diagnostic::located(&actual.name)
+                        )
+                    ),
+                )
+            }
             _ => at(
                 request,
                 "接続先のモジュールまたはポート宣言を検査できない。",
@@ -233,7 +263,9 @@ fn image_error(
         GpioImageError::MissingInput { port } => config::at(
             board,
             None,
-            &if wiring.uart.is_some() {
+            &if i2c.is_some() {
+                format!("回路入力 {} に GPIO または I²C の接続が必要。", port + 1)
+            } else if wiring.uart.is_some() {
                 format!("回路入力 {} に GPIO または UART の接続が必要。", port + 1)
             } else {
                 format!("回路入力 {} に GPIO の接続が必要。", port + 1)
@@ -263,7 +295,7 @@ pub(super) struct Source<'p, 'a> {
     pub(super) name: &'p str,
 }
 
-/// チェック済みのルートから GPIO 配線表を生成して標準出力へ書く。
+/// 検査済みのルートから RP の配線表を生成して標準出力へ書く。
 pub(super) fn export(
     source: Source<'_, '_>,
     board: &Path,
@@ -286,11 +318,32 @@ pub(super) fn export(
     }
     let period = period_micros(source.settings_path, source.settings)?;
     let wiring = read_board(board)?;
+    if let (Some(uart), Some(i2c)) = (&wiring.uart, &wiring.i2c) {
+        let (first, later) = if uart.span().start < i2c.span().start {
+            (uart.span(), i2c.span())
+        } else {
+            (i2c.span(), uart.span())
+        };
+        return Err(format!(
+            "{}\n{}",
+            config::at(
+                board,
+                Some(later),
+                "UART と I²C を同じ配線表に指定できない。"
+            ),
+            config::at(board, Some(first), "先に指定した周辺機能。"),
+        ));
+    }
     let bindings: Vec<_> = wiring
         .gpio
         .iter()
         .map(|row| row.get_ref().binding())
         .collect();
+    if let Some(settings) = &wiring.i2c {
+        return i2c::export(
+            stdout, &source, board, &wiring, settings, aliases, &bindings, period,
+        );
+    }
     if let Some(uart) = &wiring.uart {
         let image = aliases
             .build_rp_uart_image(
@@ -310,7 +363,7 @@ pub(super) fn export(
                     Some(uart.span()),
                     "UART のボーレートは0より大きい必要がある。",
                 ),
-                UartImageError::Circuit(cause) => image_error(cause, board, &wiring, &source),
+                UartImageError::Circuit(cause) => image_error(cause, board, &wiring, &source, None),
             })?;
         return write_uart_plan(stdout, wiring.board, &image).map_err(super::output_error);
     }
@@ -324,7 +377,7 @@ pub(super) fn export(
             super::BIT_LIMIT,
             super::GATE_LIMIT,
         )
-        .map_err(|error| image_error(error, board, &wiring, &source))?;
+        .map_err(|error| image_error(error, board, &wiring, &source, None))?;
     write_plan(stdout, wiring.board, &image).map_err(super::output_error)
 }
 
