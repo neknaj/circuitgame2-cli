@@ -126,7 +126,7 @@ fn check_uart_options(
     let baud = options
         .and_then(|options| options.get_ref().get("baud"))
         .ok_or_else(|| {
-            let span = options.map_or(device_span, toml::Spanned::span);
+            let span = options.map_or(device_span, |options| options.span());
             config::at(path, Some(span), "UART の options.baud を指定する。")
         })?;
     let rate = baud

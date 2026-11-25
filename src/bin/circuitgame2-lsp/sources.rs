@@ -210,7 +210,7 @@ impl<'a> SourceSet<'a> {
         }
         match &self.project {
             Some(project) => {
-                fs::read(project.root.join("circuitgame2.toml"))
+                fs::read(project.root.join(config::FILE_NAME))
                     .is_ok_and(|bytes| bytes == project.settings)
                     && members
                         .into_iter()
@@ -498,7 +498,7 @@ fn windows_source_id(file: &Path, paths: &[(String, PathBuf)]) -> Option<String>
 
 fn nearest_manifest(parent: &Path) -> Result<Option<(&Path, PathBuf)>, String> {
     for root in parent.ancestors() {
-        let manifest = root.join("circuitgame2.toml");
+        let manifest = root.join(config::FILE_NAME);
         match fs::metadata(&manifest) {
             Ok(_) => return Ok(Some((root, manifest))),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -530,7 +530,7 @@ mod tests {
                 .as_nanos(),
         ));
         fs::create_dir(&root).unwrap();
-        let settings = root.join("circuitgame2.toml");
+        let settings = root.join(config::FILE_NAME);
         let basis = root.join("basis.ncg2");
         let source = root.join("main.ncg2");
         struct Files {
