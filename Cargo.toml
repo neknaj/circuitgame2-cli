@@ -2,8 +2,9 @@
 name = "circuitgame2-cli"
 version = "0.1.0"
 edition = "2024"
+default-run = "ncg2"
 rust-version = "1.99.1"
-description = "NCG2 の回路ソースを検査し、組み合わせ関数を評価する CLI"
+description = "NCG2 の回路ソースを検査し、組み合わせ関数と順序回路を実行する CLI"
 license = "MIT"
 repository = "https://github.com/neknaj/circuitgame2-cli"
 
@@ -11,5 +12,17 @@ repository = "https://github.com/neknaj/circuitgame2-cli"
 name = "ncg2"
 path = "src/main.rs"
 
+[[bin]]
+name = "circuitgame2-lsp"
+path = "src/bin/circuitgame2-lsp/main.rs"
+
 [dependencies]
-circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "cc29152bfd7b265193113232d83aab0bf5ad230d" }
+circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "9736a48f4cc122f0c4f9389bf8c8fb32316fa2ac" }
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
+lsp-server = "0.7.9"
+lsp-types = "0.97.0"
+serde_json = "1"
+url = "2.5.9"

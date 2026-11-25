@@ -1,0 +1,9 @@
+(using nor)
+(namespace tests
+  (latch hold (width 2))
+  (module outside
+    (in (data (bits 4))) (out (q (bits 2)))
+    (def q (hold (slice data 3 2) 1)))
+  (module wrong-width
+    (in (data (bits 4))) (out (q (bits 2)))
+    (def q (hold (bit data 1) 1))))

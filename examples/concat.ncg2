@@ -1,0 +1,5 @@
+(using nor)
+(module main
+  (in low (word (bits 2)))
+  (out (joined (bits 4)))
+  (def joined (concat low word 1)))

@@ -1,5 +1,7 @@
 //! core の診断と関連箇所を端末向けに表示する。
 
+pub(super) mod clocked;
+
 use std::{
     io::{self, Write},
     ops::Range,
@@ -92,19 +94,22 @@ where
     }
 }
 
-pub(super) fn alias_warnings(report: &UseAliasReport<'_, '_>) {
+pub(super) fn alias_warnings(
+    report: &UseAliasReport<'_, '_>,
+    contextualize: impl Fn(String) -> String,
+) {
     let directives = report.targets.directives();
     let mut stderr = io::stderr().lock();
     for (alias, disposition) in directives.iter().zip(&report.dispositions) {
         if let AliasDisposition::Duplicate { first } = disposition
             && let Some(first) = directives.get(*first)
         {
-            let _ = writeln!(
-                stderr,
+            let message = format!(
                 "警告 {} 同じ別名と参照先が重複している。\n  最初の指定 {}",
                 directive(alias),
                 directive(first),
             );
+            let _ = writeln!(stderr, "{}", contextualize(message));
         }
     }
 }
@@ -114,8 +119,11 @@ fn reference_error(error: DefinitionBatchError<'_, '_>) -> String {
         &error.site.source.id.components().join("/"),
         &error.site.name.span,
     );
-    let name = error.site.name.word;
-    match error.reason {
+    reference_reason(&at, error.site.name.word, error.reason)
+}
+
+fn reference_reason(at: &str, name: &str, reason: DefinitionReferenceReason<'_, '_>) -> String {
+    match reason {
         DefinitionReferenceReason::Missing => format!("{at} {name} が見つからない。"),
         DefinitionReferenceReason::MissingPrefix => {
             format!("{at} {name} の先頭の名前を解決できない。")
@@ -142,7 +150,10 @@ fn reference_error(error: DefinitionBatchError<'_, '_>) -> String {
     }
 }
 
-pub(super) fn analysis_error(error: DefinitionAnalysisError<'_, '_>) -> String {
+pub(super) fn analysis_error(
+    error: DefinitionAnalysisError<'_, '_>,
+    contextualize: impl Fn(String) -> String,
+) -> String {
     match error {
         DefinitionAnalysisError::Basis(CircuitBasisError::Missing) => {
             "(using nor) を一つ指定する。".into()
@@ -154,7 +165,7 @@ pub(super) fn analysis_error(error: DefinitionAnalysisError<'_, '_>) -> String {
         ),
         DefinitionAnalysisError::Alias(conflict) => alias_error(conflict),
         DefinitionAnalysisError::Definition { error, aliases } => {
-            alias_warnings(&aliases);
+            alias_warnings(&aliases, contextualize);
             reference_error(error)
         }
         DefinitionAnalysisError::UseTarget(error) => match error {

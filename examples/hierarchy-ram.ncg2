@@ -1,0 +1,13 @@
+(using nor)
+(memory cell (address 1) (data (bits 1)))
+
+(module memory-port
+  (in address data write-enable)
+  (out read-data)
+  (def read-data (cell address data write-enable)))
+
+(module main
+  (in address left-data left-write right-data right-write)
+  (out left right)
+  (def left (memory-port address left-data left-write))
+  (def right (memory-port address right-data right-write)))

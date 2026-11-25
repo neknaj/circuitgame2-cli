@@ -1,0 +1,7 @@
+(namespace tests
+  (module-part cycle
+    (def y x))
+  (module-part selection-cycle
+    (def right (slice left 0 1)))
+  (module-part concat-cycle
+    (def y (bit x 1))))

@@ -1,0 +1,7 @@
+(using nor)
+(memory bank (address 1) (data (bits 2)))
+
+(module main
+  (in address (data (bits 2)) write-enable)
+  (out (read-data (bits 2)))
+  (def read-data (bank address data write-enable)))
