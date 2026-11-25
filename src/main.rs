@@ -7,6 +7,7 @@ mod device_config;
 mod diagnostic;
 mod dump;
 mod formatting;
+mod rp_plan;
 mod settling;
 
 use std::{
@@ -41,6 +42,7 @@ const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価して�
   ncg2 run --project <設定ファイル> [--input <ビット列> ... | --ticks <回数>] [--vram <公開名>]...\n\
   ncg2 settle [--within <tick 数> [--period <間隔>]] [--entry <モジュール名>] <ファイル>...\n\
   ncg2 settle [--within <tick 数> [--period <間隔>]] --project <設定ファイル>\n\
+  ncg2 rp-plan --project <設定ファイル> --board <ボード設定>\n\
   ncg2 --help\n\
   ncg2 --version\n\
 \n\
@@ -70,6 +72,10 @@ enum Command<'a> {
         json: bool,
     },
     Dump(SourceInput<'a>),
+    RpPlan {
+        project: &'a str,
+        board: &'a str,
+    },
     Format(formatting::FormatCommand<'a>),
     Eval {
         name: &'a str,
@@ -337,6 +343,21 @@ fn command(args: &[String]) -> Result<Command<'_>, String> {
                 sources: source_input(files)?,
             })
         }
+        [rp, first, left, second, right]
+            if rp == "rp-plan" && !left.starts_with('-') && !right.starts_with('-') =>
+        {
+            match (first.as_str(), second.as_str()) {
+                ("--project", "--board") => Ok(Command::RpPlan {
+                    project: left,
+                    board: right,
+                }),
+                ("--board", "--project") => Ok(Command::RpPlan {
+                    project: right,
+                    board: left,
+                }),
+                _ => Err("rp-plan には --project と --board を指定する。".into()),
+            }
+        }
         [run, args @ ..] if run == "run" => run_command(args),
         [settle, args @ ..] if settle == "settle" => settle_command(args),
         _ => Err("使い方は ncg2 --help で確認できる。".into()),
@@ -498,6 +519,7 @@ fn execute(
                 .map(|()| ExitCode::SUCCESS);
         }
         Command::Format(format) => return formatting::run(format, stdout),
+        Command::RpPlan { project, .. } => SourceInput::Project(project),
         Command::Check { sources, .. }
         | Command::Dump(sources)
         | Command::Eval { sources, .. }
@@ -520,7 +542,10 @@ fn execute(
         }
         SourceInput::Project(path) => {
             let path = Path::new(path);
-            let settings = if matches!(command, Command::Check { .. } | Command::Dump(_)) {
+            let settings = if matches!(
+                command,
+                Command::Check { .. } | Command::Dump(_) | Command::RpPlan { .. }
+            ) {
                 config::read_settings_located(path)
                     .map_err(|error| {
                         if let Some(report) = &mut report {
@@ -616,6 +641,34 @@ fn execute(
                 )?;
             device_config::check(path, settings, aliases, ModuleBodyPosition { file, entry })?;
         }
+    }
+
+    if let (Command::RpPlan { board, .. }, Some((path, settings))) = (&command, &settings) {
+        let name = settings
+            .entry
+            .as_ref()
+            .map_or("::main", |entry| entry.get_ref());
+        let (file, entry) = declaration_position(&project, prepared.targets(), name, Head::Module)
+            .map_err(|error| {
+                config::at(
+                    path,
+                    settings.entry.as_ref().map(|entry| entry.span()),
+                    &error,
+                )
+            })?;
+        return rp_plan::export(
+            rp_plan::Source {
+                settings_path: path,
+                settings,
+                project: &project,
+                owner: ModuleBodyPosition { file, entry },
+                name,
+            },
+            Path::new(board),
+            aliases,
+            stdout,
+        )
+        .map(|()| ExitCode::SUCCESS);
     }
 
     let (name, kind) = match &command {
