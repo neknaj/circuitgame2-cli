@@ -9,7 +9,7 @@ use circuitgame2_core::{
 };
 use lsp_types::Location;
 
-use super::sources::{OpenDocument, SourceSet};
+use super::sources::{DiskSyntaxCache, OpenDocument, SourceSet};
 
 /// 指定位置にある `def` の参照、`use`、`module-part` の対象が指す宣言を探す。
 ///
@@ -23,6 +23,7 @@ pub(super) fn locate<'a>(
     position: TextPosition,
     encoding: PositionEncoding,
     open: impl Iterator<Item = OpenDocument<'a>>,
+    disk: &DiskSyntaxCache,
 ) -> Result<Option<Location>, String> {
     let Some(text) = current.text else {
         return Ok(None);
@@ -31,7 +32,7 @@ pub(super) fn locate<'a>(
         return Ok(None);
     };
     let (current_id, sources) = SourceSet::load(current, open)?;
-    let Ok(project) = sources.parse_strict() else {
+    let Ok(project) = sources.parse_strict_with_disk_cache(Some(disk)) else {
         return Ok(None);
     };
     let current_path = normalize_path(&current_id)
@@ -98,6 +99,7 @@ mod tests {
                 TextPosition { line, column },
                 PositionEncoding::Utf16,
                 std::iter::once(current),
+                &DiskSyntaxCache::default(),
             )
             .unwrap()
         };
@@ -134,6 +136,7 @@ mod tests {
                 TextPosition { line, column },
                 PositionEncoding::Utf16,
                 std::iter::once(current),
+                &DiskSyntaxCache::default(),
             )
             .unwrap()
         };

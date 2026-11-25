@@ -12,7 +12,7 @@ use lsp_types::{InlayHint, InlayHintLabel, InlayHintTooltip, Uri};
 
 use super::{
     diagnostic::wire_range,
-    sources::{OpenDocument, SourceSet},
+    sources::{DiskSyntaxCache, OpenDocument, SourceSet},
 };
 
 /// 照会時に確認したヒントと、解析対象だった文書の識別子。
@@ -30,6 +30,7 @@ pub(super) fn collect<'a>(
     end: TextPosition,
     encoding: PositionEncoding,
     open: impl Iterator<Item = OpenDocument<'a>>,
+    disk: &DiskSyntaxCache,
 ) -> Option<HintSnapshot> {
     let text = current.text?;
     let lines = LineIndex::new(text);
@@ -39,7 +40,7 @@ pub(super) fn collect<'a>(
         return None;
     }
     let (id, sources) = SourceSet::load(current, open).ok()?;
-    let hints = analyze(text, &lines, start..end, encoding, &id, &sources);
+    let hints = analyze(text, &lines, start..end, encoding, &id, &sources, disk);
     sources
         .still_current([(current.uri, id.as_str())])
         .then(|| HintSnapshot {
@@ -55,11 +56,12 @@ fn analyze(
     encoding: PositionEncoding,
     id: &str,
     sources: &SourceSet<'_>,
+    disk: &DiskSyntaxCache,
 ) -> Vec<InlayHint> {
     let Ok(path) = normalize_path(id) else {
         return Vec::new();
     };
-    let Ok(project) = sources.parse_strict() else {
+    let Ok(project) = sources.parse_strict_with_disk_cache(Some(disk)) else {
         return Vec::new();
     };
     let Some(file) = project
