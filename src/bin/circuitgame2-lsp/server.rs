@@ -9,7 +9,7 @@ use std::{
 };
 
 use circuitgame2_core::{
-    editor::{LineIndex, PositionEncoding, TextPosition, apply_source_edit},
+    editor::{LineIndex, PositionEncoding, TextPosition, prepare_source_edit},
     syntax::circuit::CachedCircuitRecovery,
 };
 use lsp_server::{ErrorCode, Message, Notification, Request, Response};
@@ -715,12 +715,16 @@ fn apply_changes(
         let end = lines
             .position_to_byte(text_position(range.end)?, encoding)
             .ok_or("変更範囲の終点が文字境界または既存の行を指していない。")?;
-        let edited = apply_source_edit(source, start..end, &change.text)
+        let parts = prepare_source_edit(source, start..end, &change.text)
             .map_err(|_| "変更範囲の順序、長さ、または文字境界が不正。")?;
+        let mut edited = String::with_capacity(parts.byte_len);
+        edited.push_str(parts.prefix);
+        edited.push_str(parts.replacement);
+        edited.push_str(parts.suffix);
         if single_change {
             single_edit = Some(start..end);
         }
-        current = Some(Cow::Owned(edited.as_str().to_owned()));
+        current = Some(Cow::Owned(edited));
     }
     let text = current.ok_or("本文を全文置換で受け取る必要がある。")?;
     Ok(AppliedChanges { text, single_edit })
