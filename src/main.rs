@@ -6,6 +6,7 @@ mod clocked;
 mod device_config;
 mod diagnostic;
 mod dump;
+mod formatting;
 mod settling;
 
 use std::{
@@ -32,6 +33,7 @@ const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価して�
   ncg2 check [--format json] --project <設定ファイル>\n\
   ncg2 dump <ファイル>...\n\
   ncg2 dump --project <設定ファイル>\n\
+  ncg2 fmt [--check | --write] <ファイル>\n\
   ncg2 eval --func <関数名> --input <ビット列> <ファイル>...\n\
   ncg2 eval --func <関数名> --input <ビット列> --project <設定ファイル>\n\
   ncg2 run [--entry <モジュール名>] [--input <ビット列> ... | --ticks <回数>] <ファイル>...\n\
@@ -51,6 +53,8 @@ run の既定の開始点は ::main。--input 一つにつき 1 tick 進める�
 run は reset 直後を tick 0 とし、各行に tick 番号と出力ビット列を表示する。\n\
 --vram を指定すると、指定順に各 VRAM の記憶部を追加する。\n\
 settle は固定入力での定常化を解析する。ネイティブ版では未推定・未証明の終了コードは 2。\n\
+fmt は整形結果を標準出力に表示する。--check は整形が必要な場合に終了コード 1 を返す。\n\
+ネイティブ版の fmt --write は構文検査と整形が成功した場合にファイルを置き換える。\n\
 入出力はポートの宣言順に並べ、各ポート内は最下位ビットから記す。";
 
 const WIDTH_LIMIT: u64 = circuitgame2_cli::CLOCKED_LIMITS.width;
@@ -65,6 +69,7 @@ enum Command<'a> {
         json: bool,
     },
     Dump(SourceInput<'a>),
+    Format(formatting::FormatCommand<'a>),
     Eval {
         name: &'a str,
         input: &'a str,
@@ -317,6 +322,7 @@ fn command(args: &[String]) -> Result<Command<'_>, String> {
             })
         }
         [dump, files @ ..] if dump == "dump" => Ok(Command::Dump(source_input(files)?)),
+        [format, args @ ..] if format == "fmt" => formatting::command(args).map(Command::Format),
         [eval, func_flag, name, input_flag, input, files @ ..]
             if eval == "eval"
                 && func_flag == "--func"
@@ -490,6 +496,7 @@ fn execute(
                 .map_err(output_error)
                 .map(|()| ExitCode::SUCCESS);
         }
+        Command::Format(format) => return formatting::run(format, stdout),
         Command::Check { sources, .. }
         | Command::Dump(sources)
         | Command::Eval { sources, .. }

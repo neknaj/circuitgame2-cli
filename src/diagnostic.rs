@@ -8,6 +8,7 @@ use std::{
 };
 
 use circuitgame2_core::{
+    ncg2m::{defn::DefnHeaderError, file::MetaFileError},
     project::{
         AbsoluteTarget, AliasConflict, AliasDisposition, BitFuncError, CircuitBasisError,
         CircuitProject, CircuitProjectError, DefinitionAnalysisError, DefinitionBatchError,
@@ -32,25 +33,68 @@ fn directive(site: &ResolvedUse<'_, '_>) -> String {
     )
 }
 
+pub(super) fn circuit_form_error(path: &str, error: CircuitFormError) -> String {
+    match error {
+        CircuitFormError::Syntax(error) => {
+            format!(
+                "{} 構文エラー ({:?})。",
+                position(path, &error.span),
+                error.kind
+            )
+        }
+        CircuitFormError::Header { kind, span } => {
+            format!(
+                "{} 回路フォームの構文エラー ({kind:?})。",
+                position(path, &span)
+            )
+        }
+    }
+}
+
+pub(super) fn meta_file_error(path: &str, error: MetaFileError) -> String {
+    match error {
+        MetaFileError::Syntax(error) | MetaFileError::Defn(DefnHeaderError::Syntax(error)) => {
+            circuit_form_error(path, CircuitFormError::Syntax(error))
+        }
+        MetaFileError::ExpectedItem(span) => format!(
+            "{} この位置に書ける NCG2M フォームを指定する。",
+            position(path, &span)
+        ),
+        MetaFileError::Directive { span, kind } => format!(
+            "{} 指定の引数が必要な形式に合わない ({kind:?})。",
+            position(path, &span)
+        ),
+        MetaFileError::Defmacro { span, part } => format!(
+            "{} マクロ宣言の形式が合わない ({part:?})。",
+            position(path, &span)
+        ),
+        MetaFileError::Defn(DefnHeaderError::ExpectedOneDeclaration(span)) => {
+            format!("{} 補助関数の宣言を1つ指定する。", position(path, &span))
+        }
+        MetaFileError::Defn(DefnHeaderError::Expected { span, part }) => format!(
+            "{} 補助関数の宣言の形式が合わない ({part:?})。",
+            position(path, &span)
+        ),
+        MetaFileError::Defn(DefnHeaderError::DuplicateParameter { duplicate, first }) => format!(
+            "{} 同じ仮引数名が複数ある。\n  最初の仮引数 {}",
+            position(path, &duplicate),
+            position(path, &first)
+        ),
+        MetaFileError::Defn(DefnHeaderError::ParameterCount {
+            arguments,
+            parameters,
+        }) => format!(
+            "{} 仮引数の数が署名と一致しない。\n  引数型リスト {}",
+            position(path, &parameters),
+            position(path, &arguments)
+        ),
+    }
+}
+
 pub(super) fn project_error(error: CircuitProjectError<'_>) -> String {
     match error {
         CircuitProjectError::Syntax { id, error, .. } => {
-            let path = id.components().join("/");
-            match error {
-                CircuitFormError::Syntax(error) => {
-                    format!(
-                        "{} 構文エラー ({:?})。",
-                        position(&path, &error.span),
-                        error.kind
-                    )
-                }
-                CircuitFormError::Header { kind, span } => {
-                    format!(
-                        "{} 回路フォームの構文エラー ({kind:?})。",
-                        position(&path, &span)
-                    )
-                }
-            }
+            circuit_form_error(&id.components().join("/"), error)
         }
         CircuitProjectError::Sources(error) => {
             format!("ソースを収集できない ({error:?})。")
