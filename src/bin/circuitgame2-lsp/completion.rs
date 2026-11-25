@@ -107,8 +107,10 @@ mod tests {
         };
         let (_, source_set) = SourceSet::load(current, [current].into_iter()).unwrap();
         let mut disk = DiskSyntaxCache::default();
-        assert!(source_set.parse_strict().is_ok());
-        disk.extend(source_set.stage_disk_indexes(&disk));
+        let (_, staged) = source_set
+            .parse_strict_recording_disk_indexes(&disk)
+            .unwrap();
+        disk.extend(staged);
         assert!(source_set.syntax_candidates(Some(&disk))[0].is_some());
 
         let complete = || {
