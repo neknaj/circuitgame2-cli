@@ -84,7 +84,7 @@ impl LocalRecovery {
                     .relocated(self.old_join, sections[2].byte_base)?,
             );
         }
-        Some(render(uri, snapshot.source(), reports, encoding))
+        Some(render(uri, snapshot.source(), reports, encoding, "NCG2"))
     }
 }
 

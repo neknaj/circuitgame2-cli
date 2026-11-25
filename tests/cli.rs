@@ -109,6 +109,61 @@ fn check_resolves_a_cross_language_use_before_reporting_the_unsupported_circuit_
 }
 
 #[test]
+fn mixed_check_reports_basis_errors_before_resolving_names() {
+    let folder = tempfile::tempdir().unwrap();
+    let dir = folder.path();
+    let settings = dir.join("circuitgame2.toml");
+    fs::write(
+        &settings,
+        "sources = [\"tools.ncg2m\", \"main.ncg2\", \"other.ncg2\"]\n",
+    )
+    .unwrap();
+    fs::write(dir.join("tools.ncg2m"), "").unwrap();
+    let circuit = "(use ::missing::item absent) (func gate (in a) (out a))";
+    let main = dir.join("main.ncg2");
+    let other = dir.join("other.ncg2");
+    fs::write(&main, circuit).unwrap();
+    fs::write(&other, "").unwrap();
+
+    let args = [
+        "check",
+        "--format",
+        "json",
+        "--project",
+        settings.to_str().unwrap(),
+    ];
+    let check = || {
+        let result = cli(&args);
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert!(result.stderr.is_empty());
+        serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap()
+    };
+    let json = check();
+    assert_eq!(json["version"], 1);
+    assert_eq!(json["files"], 3);
+    assert_eq!(json["diagnostics"][0]["code"], "missing_basis");
+    assert!(json["diagnostics"][0]["location"].is_null());
+
+    let first = format!("; 猫\n(using nor) {circuit}");
+    let later = "; 基底\n(using nor)";
+    fs::write(&main, &first).unwrap();
+    fs::write(&other, later).unwrap();
+    let json = check();
+    let diagnostic = &json["diagnostics"][0];
+    assert_eq!(diagnostic["code"], "duplicate_basis");
+    let related_offset = first.find("nor").unwrap();
+    let primary_offset = later.find("nor").unwrap();
+    assert_eq!(
+        diagnostic["location"],
+        serde_json::json!({"path":"other.ncg2","range":{"start":primary_offset,"end":primary_offset+3}})
+    );
+    assert_eq!(
+        diagnostic["related"],
+        serde_json::json!([{"path":"main.ncg2","range":{"start":related_offset,"end":related_offset+3}}])
+    );
+}
+
+#[test]
 fn check_ncg2m_reports_original_ranges_for_unchecked_and_invalid_expressions() {
     let folder = tempfile::tempdir().unwrap();
     let dir = folder.path();

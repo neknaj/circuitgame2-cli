@@ -8,6 +8,7 @@ use circuitgame2_core::{
         AliasConflict, AliasDisposition, DefinitionAnalysisError, LocatedName, MixedAbsoluteTarget,
         MixedUseAliasConflict, ProjectSource, ProjectSourceIndex, SourceSnapshot, UseSite,
         check_mixed_use_aliases, index_mixed_use_targets, parse_project_sources,
+        validate_mixed_circuit_basis,
     },
     syntax::circuit::Head,
 };
@@ -27,6 +28,13 @@ pub(super) fn check(
     if let Some(report) = report {
         report.files = Some(project.sources().len());
     }
+    validate_mixed_circuit_basis(&project).map_err(|error| {
+        let error = DefinitionAnalysisError::Basis(error);
+        if let Some(report) = report {
+            report.analysis_error(&error);
+        }
+        contextualize(diagnostic::analysis_error(error))
+    })?;
     let targets = index_mixed_use_targets(&project).map_err(|error| {
         let error = DefinitionAnalysisError::UseTarget(error);
         if let Some(report) = report {
@@ -85,7 +93,7 @@ pub(super) fn check(
                     report,
                     "unsupported_mixed_circuit_check",
                     site(source, span),
-                    "NCG2M を含むプロジェクトでは、回路の基底と本体の検査には対応していない。",
+                    "NCG2M を含むプロジェクトでは、回路本体の検査には対応していない。",
                     [],
                 )));
             }
