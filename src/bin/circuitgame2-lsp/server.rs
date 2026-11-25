@@ -10,7 +10,7 @@ use std::{
 
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding, TextPosition, prepare_source_edit},
-    ncg2m::file::recovery::{MetaFileRecovery, recover_meta_file},
+    ncg2m::file::recovery::{MetaFileRecovery, recover_meta_file_with_provisional},
     project::SourceKind,
     syntax::circuit::CachedCircuitRecovery,
 };
@@ -76,7 +76,8 @@ impl DocumentAnalysis {
                 (Self::Full(analysis), diagnostics)
             }
             SourceKind::Functional => {
-                let (outline, diagnostics) = match recover_meta_file(&text) {
+                let (recovery, provisional) = recover_meta_file_with_provisional(&text);
+                let (outline, diagnostics) = match recovery {
                     MetaFileRecovery::Complete(items) => {
                         (symbols::FunctionalOutline::Complete(items), Vec::new())
                     }
@@ -93,7 +94,10 @@ impl DocumentAnalysis {
                             &syntax.repairs,
                             &lists,
                         );
-                        (symbols::FunctionalOutline::Fragments(lists), diagnostics)
+                        (
+                            symbols::FunctionalOutline::Fragments { lists, provisional },
+                            diagnostics,
+                        )
                     }
                 };
                 (Self::Functional { text, outline }, diagnostics)
