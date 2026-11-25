@@ -166,13 +166,36 @@ ncg2 run --project examples/vram/circuitgame2.toml --vram screen --input 1101 --
 
 `--vram` を複数指定した場合は、指定順に列を追加する。公開名が `-` で始まる場合は `--vram=-screen` の形で指定する。`run --project` は `--vram` を省いた場合も、設定された読み出し信号を検査する。
 
-## RP 向けの GPIO 配線表を作る
+## RP 向けの配線表を作る
 
 ```sh
 ncg2 rp-plan --project circuitgame2.toml --board board.toml
 ```
 
-Pico または Pico 2 向けに回路と GPIO の割り当てを検査し、ファームウェアのビルドに渡す配線表を標準出力へ書く。対象は単一ビットの入出力を持つ順序 NOR 回路。ルート回路の各入力には GPIO の接続を指定し、`tick-ns` は正の整数マイクロ秒で表す。 [設定とビルドの例](https://github.com/neknaj/circuitgame2/tree/main/examples/rp-gpio)
+Pico または Pico 2 向けに回路と端子の割り当てを検査し、配線表を標準出力へ書く。対象は単一ビットの入出力を持つ順序 NOR 回路。`tick-ns` は正の整数マイクロ秒で表し、各回路入力を GPIO または UART の一つの信号で駆動する。 [GPIO の設定とビルドの例](https://github.com/neknaj/circuitgame2/tree/main/examples/rp-gpio)
+
+UART を使う場合は `board.toml` に `[uart]` を追加する。各ポート名をルート回路の宣言に合わせ、データのビットは最下位から並べる。
+
+```toml
+[uart]
+instance = 0
+tx-pin = 0
+rx-pin = 1
+baud = 115200
+rx-data = ["rx0", "rx1", "rx2", "rx3", "rx4", "rx5", "rx6", "rx7"]
+rx-valid = "rx-valid"
+rx-framing = "rx-framing"
+rx-overrun = "rx-overrun"
+rx-ready = "rx-ready"
+tx-data = ["tx0", "tx1", "tx2", "tx3", "tx4", "tx5", "tx6", "tx7"]
+tx-valid = "tx-valid"
+tx-ready = "tx-ready"
+tx-done = "tx-done"
+tx-ok = "tx-ok"
+tx-done-ready = "tx-done-ready"
+```
+
+生成した UART 配線表を使う場合は、ファームウェアのビルドに `uart` feature を追加する。 [RP ファームウェアのビルドと信号の扱い](https://github.com/neknaj/circuitgame2-core/tree/main/firmware/rp)
 
 ## 定常化を調べる
 
