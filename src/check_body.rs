@@ -4,9 +4,9 @@ use circuitgame2_cli::CLOCKED_LIMITS;
 use circuitgame2_core::{
     project::{
         CircuitProject, FuncArityError, FuncAtomTypeError, FuncDriverError, FuncLiteralError,
-        FuncSignalReason, FuncSignalTypeError, FuncWiringError, FuncWiringResult, LocatedName,
-        ModuleBodyPosition, ModuleCallInputsError, ModuleCallsError, ModuleOutputTypesError,
-        UseAliases,
+        FuncSignalReason, FuncSignalTypeError, FuncWiringError, FuncWiringResult,
+        FunctionExpansionError, LocatedName, ModuleBodyPosition, ModuleCallInputsError,
+        ModuleCallsError, ModuleOutputTypesError, UseAliases,
     },
     syntax::circuit::Head,
 };
@@ -91,6 +91,18 @@ pub(super) fn check<'p, 'a>(
             }
         }
     }
+    aliases.prepare_function_expansion().map_err(|error| {
+        if let (Some(report), FunctionExpansionError::Cycle(sites)) = (report, &error)
+            && let Some((first, rest)) = sites.split_first()
+        {
+            report.body_error(
+                "function_cycle",
+                &first.location,
+                rest.iter().map(|site| &site.location),
+            );
+        }
+        diagnostic::function_expansion_error(error)
+    })?;
     Ok(())
 }
 

@@ -200,21 +200,24 @@ pub(super) fn analysis_error(
     }
 }
 
-pub(super) fn expansion_error(
-    project: &CircuitProject<'_>,
-    error: ExpandFunctionsError<'_, '_>,
-) -> String {
+pub(super) fn function_expansion_error(error: FunctionExpansionError<'_, '_>) -> String {
     match error {
-        ExpandFunctionsError::Plan(FunctionExpansionError::Reference(error)) => {
-            reference_error(error)
-        }
-        ExpandFunctionsError::Plan(FunctionExpansionError::Cycle(sites)) => {
+        FunctionExpansionError::Reference(error) => reference_error(error),
+        FunctionExpansionError::Cycle(sites) => {
             let mut message = "func の呼び出しが循環している。".to_owned();
             for site in sites {
                 message.push_str(&format!("\n  {}", located(&site.location)));
             }
             message
         }
+    }
+}
+pub(super) fn expansion_error(
+    project: &CircuitProject<'_>,
+    error: ExpandFunctionsError<'_, '_>,
+) -> String {
+    match error {
+        ExpandFunctionsError::Plan(error) => function_expansion_error(error),
         ExpandFunctionsError::Function {
             position: (file, entry),
             diagnostic,

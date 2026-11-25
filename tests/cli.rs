@@ -507,6 +507,29 @@ fn namespace_selection_and_diagnostics_preserve_file_boundaries() {
         error["location"]["range"],
         serde_json::json!({"start": start, "end": start + call.len()})
     );
+
+    let left = "(using nor) (func left (in x) (out y) (def y (right x)))";
+    let right = "(func right (in x) (out y) (def y (left x)))";
+    fs::write(folder.0.join("left.ncg2"), left).unwrap();
+    fs::write(folder.0.join("right.ncg2"), right).unwrap();
+    let machine = run(&["check", "--format", "json", "left.ncg2", "right.ncg2"]);
+    assert_eq!(machine.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    let error = &report["diagnostics"][0];
+    assert_eq!(error["code"], "function_cycle");
+    let mut edges = [&error["location"], &error["related"][0]];
+    edges.sort_by_key(|edge| edge["path"].as_str().unwrap());
+    for (edge, path, source, target) in [
+        (edges[0], "left.ncg2", left, "right"),
+        (edges[1], "right.ncg2", right, "left"),
+    ] {
+        let start = source.find(target).unwrap();
+        assert_eq!(edge["path"], path);
+        assert_eq!(
+            edge["range"],
+            serde_json::json!({"start": start, "end": start + target.len()})
+        );
+    }
 }
 
 #[test]
