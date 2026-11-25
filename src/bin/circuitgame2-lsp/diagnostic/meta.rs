@@ -4,22 +4,20 @@ use circuitgame2_core::{
     editor::PositionEncoding,
     ncg2m::{
         defn::{DefnHeaderError, DefnPart},
-        file::{MacroPart, MetaFileError, index_meta_file},
+        file::{MacroPart, MetaFileError},
     },
 };
 use lsp_types::{Diagnostic, Uri};
 
 use super::{Report, header, render, syntax};
 
-/// 宣言と名前解決の指示を検査し、元の文書の主範囲と関連範囲を返す。
-pub(in super::super) fn collect_meta(
+/// 厳格索引が返したエラーの主範囲と関連範囲を、文書内の LSP 位置に変換する。
+pub(in super::super) fn render_meta_error(
     uri: &Uri,
     source: &str,
     encoding: PositionEncoding,
+    error: MetaFileError,
 ) -> Vec<Diagnostic> {
-    let Err(error) = index_meta_file(source) else {
-        return Vec::new();
-    };
     render(uri, source, vec![meta(error)], encoding, "NCG2M")
 }
 
