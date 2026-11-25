@@ -109,6 +109,70 @@ fn check_resolves_a_cross_language_use_before_reporting_the_unsupported_circuit_
 }
 
 #[test]
+fn mixed_check_reports_call_errors_with_original_cross_file_ranges() {
+    let folder = tempfile::tempdir().unwrap();
+    let dir = folder.path();
+    let settings = dir.join("circuitgame2.toml");
+    fs::write(
+        &settings,
+        "sources = [\"gates.ncg2\", \"helpers.ncg2m\", \"main.ncg2\"]\n",
+    )
+    .unwrap();
+    let gates = "; 日本語\n(namespace gates (export invert) (func invert (in a) (out y) (def y (nor a a))))";
+    let helpers =
+        "; 🐈\n(namespace tools (export ready) (defn ready (as-type (Fn () Bool) (fn () true))))";
+    fs::write(dir.join("gates.ncg2"), gates).unwrap();
+    fs::write(dir.join("helpers.ncg2m"), helpers).unwrap();
+    let check_error = |call: &str,
+                       code,
+                       primary: &str,
+                       related_path,
+                       related_source: &str,
+                       related: &str| {
+        let source = format!("; 🐈\n(using nor) (func gate (in a) (out y) (def y {call}))");
+        fs::write(dir.join("main.ncg2"), &source).unwrap();
+        let result = cli(&[
+            "check",
+            "--format",
+            "json",
+            "--project",
+            settings.to_str().unwrap(),
+        ]);
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert!(result.stderr.is_empty());
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let diagnostic = &report["diagnostics"][0];
+        let start = source.rfind(primary).unwrap();
+        let other = related_source.rfind(related).unwrap();
+        assert_eq!(diagnostic["code"], code);
+        assert_eq!(
+            diagnostic["location"],
+            serde_json::json!({"path": "main.ncg2", "range": {"start": start, "end": start + primary.len()}})
+        );
+        assert_eq!(
+            diagnostic["related"],
+            serde_json::json!([{"path": related_path, "range": {"start": other, "end": other + related.len()}}])
+        );
+    };
+    check_error(
+        "(::tools::ready a)",
+        "wrong_declaration_kind",
+        "::tools::ready",
+        "helpers.ncg2m",
+        helpers,
+        "ready",
+    );
+    check_error(
+        "(::gates::invert a a)",
+        "argument_count",
+        "(::gates::invert a a)",
+        "gates.ncg2",
+        gates,
+        "invert",
+    );
+}
+
+#[test]
 fn mixed_check_reports_basis_errors_before_resolving_names() {
     let folder = tempfile::tempdir().unwrap();
     let dir = folder.path();

@@ -14,8 +14,9 @@ use circuitgame2_core::{
         integers::{IntegerLiteralError, IntegerType},
     },
     project::{
-        CircuitProjectError, DefnCallError, DefnCallGraphError, DefnNameError,
-        ParsedProjectSources, ProjectFileSyntaxError, ProjectSource, ProjectSourceParseError,
+        CircuitProjectError, DefnCallError, DefnCallGraphError, DefnNameError, MixedFuncCallError,
+        MixedFuncCalleeError, ParsedProjectSources, ProjectFileSyntaxError, ProjectSource,
+        ProjectSourceParseError,
     },
 };
 
@@ -58,6 +59,52 @@ pub(super) fn parse(
         report.project_error(&error);
     }
     diagnostic::project_error(error)
+}
+
+/// 回路の呼び出し名と、その名前解決を妨げた宣言の位置を表示する。
+pub(super) fn circuit_call(
+    error: MixedFuncCallError<'_, '_>,
+    report: &mut Option<&mut Report<'_>>,
+) -> String {
+    let (code, message, related) = match error.reason {
+        MixedFuncCalleeError::Missing => (
+            "missing_reference",
+            "呼び出し先の回路関数が見つからない。",
+            None,
+        ),
+        MixedFuncCalleeError::MissingPrefix => (
+            "missing_reference_prefix",
+            "パスの先頭に対応する名前空間または別名が見つからない。",
+            None,
+        ),
+        MixedFuncCalleeError::DeclarationPrefix(declaration) => (
+            "declaration_prefix",
+            "パスの先頭が宣言を指しているため、その内側をたどれない。",
+            Some(("パスの先頭が指す宣言", declaration.name)),
+        ),
+        MixedFuncCalleeError::Private(location) => (
+            "private_reference",
+            "別の名前空間にある非公開の宣言は参照できない。",
+            Some(("非公開の宣言", location)),
+        ),
+        MixedFuncCalleeError::Namespace(location) => (
+            "namespace_reference",
+            "呼び出し先に回路関数を指定する。",
+            Some(("名前空間の宣言", location)),
+        ),
+        MixedFuncCalleeError::WrongDeclaration(declaration) => (
+            "wrong_declaration_kind",
+            "呼び出し先に回路関数を指定する。",
+            Some(("名前が指す宣言", declaration.name)),
+        ),
+    };
+    failure(
+        report,
+        code,
+        site(error.site.source, error.site.name.span),
+        message,
+        related,
+    )
 }
 
 pub(super) fn calls(
