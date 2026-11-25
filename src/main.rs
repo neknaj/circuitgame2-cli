@@ -513,7 +513,14 @@ fn execute(
         SourceInput::Project(path) => {
             let path = Path::new(path);
             let settings = if matches!(command, Command::Check { .. } | Command::Dump(_)) {
-                config::read_settings(path)?
+                config::read_settings_located(path)
+                    .map_err(|error| {
+                        if let Some(report) = &mut report {
+                            report.settings_error(error.code, path, error.span.clone());
+                        }
+                        config::at(path, error.span, &error.reason)
+                    })?
+                    .0
             } else {
                 config::read(path)?
             };
@@ -521,7 +528,12 @@ fn execute(
             for value in settings.sources.get_ref() {
                 let result = source_path(value.get_ref(), true)
                     .and_then(|source| read_source(&mut sources, &mut seen, base, source));
-                result.map_err(|error| config::at(path, Some(value.span()), &error))?;
+                result.map_err(|error| {
+                    if let Some(report) = &mut report {
+                        report.settings_error("settings_source", path, Some(value.span()));
+                    }
+                    config::at(path, Some(value.span()), &error)
+                })?;
             }
             Some((path, settings))
         }

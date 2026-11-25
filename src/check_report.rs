@@ -1,6 +1,6 @@
 //! 検査時に得た型付き診断を、コマンド呼び出し側が読める JSON に写す。
 
-use std::{io::Write, ops::Range, process::ExitCode};
+use std::{io::Write, ops::Range, path::Path, process::ExitCode};
 
 use circuitgame2_core::{
     project::{
@@ -217,6 +217,20 @@ impl<'a> Report<'a> {
         }
     }
 
+    /// 設定ファイルと、その中で診断が指すバイト範囲を保存する。
+    pub(super) fn settings_error(
+        &mut self,
+        code: &'static str,
+        path: &Path,
+        span: Option<Range<usize>>,
+    ) {
+        let location = span.map(|range| Location {
+            path: path.display().to_string(),
+            range,
+        });
+        self.diagnostics
+            .push(Diagnostic::error(code, location, vec![]));
+    }
     pub(super) fn project_error(&mut self, error: &CircuitProjectError<'_>) {
         self.diagnostics.push(Diagnostic::project(error));
     }

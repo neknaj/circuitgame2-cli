@@ -178,6 +178,17 @@ fn project_settings_errors_have_utf8_byte_ranges() {
     assert!(error.contains(&format!("{path}[15..16]")), "{error}");
     assert!(error.contains("不正な UTF-8"), "{error}");
 
+    let machine = cli(&["check", "--format", "json", "--project", path]);
+    assert_eq!(machine.status.code(), Some(1));
+    assert!(machine.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(report["diagnostics"][0]["code"], "settings_utf8");
+    assert_eq!(report["diagnostics"][0]["location"]["path"], path);
+    assert_eq!(
+        report["diagnostics"][0]["location"]["range"],
+        serde_json::json!({"start": 15, "end": 16}),
+    );
+
     for (source, expected) in [
         ("sources = [\"main.ncg2\"]\nunknown = true\n", "unknown"),
         (
