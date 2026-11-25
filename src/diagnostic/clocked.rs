@@ -505,6 +505,7 @@ fn concat_error(site: &str, error: ModuleConcatsError<'_, '_>) -> String {
         ModuleConcatsError::Literal { literal, error } => {
             format!("{} {}", located(&literal), literal_width_error(error),)
         }
+        ModuleConcatsError::Selection(error) => selection(error),
         ModuleConcatsError::Width { concat, reason } => {
             let detail = match reason {
                 ConcatResultWidthError::Arguments(ConcatWidthError::Empty) => {
