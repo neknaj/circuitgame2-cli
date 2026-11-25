@@ -6,7 +6,7 @@ use circuitgame2_core::{
     project::{
         AbsoluteTarget, AliasConflict, AliasDisposition, CircuitBasisError, CircuitProjectError,
         DefinitionAnalysisError, DefinitionBatchError, DefinitionReferenceReason, ExportError,
-        LocatedName, ResolvedUse, UseTargetError,
+        LocatedName, ResolvedUse, UseSite, UseTargetError,
     },
     syntax::circuit::{CircuitFormError, HeaderError},
 };
@@ -245,6 +245,25 @@ impl<'a> Report<'a> {
         self.diagnostics.push(Diagnostic::definition(error));
     }
 
+    /// ソースを構文解析できなかった場合に、ファイル内の原文範囲を保存する。
+    pub(super) fn file_error(
+        &mut self,
+        code: &'static str,
+        path: &str,
+        range: Range<usize>,
+        related: Option<Range<usize>>,
+    ) {
+        let location = |range| Location {
+            path: path.to_owned(),
+            range,
+        };
+        self.diagnostics.push(Diagnostic::error(
+            code,
+            Some(location(range)),
+            related.map(location).into_iter().collect(),
+        ));
+    }
+
     /// 診断と関連位置を、元ソースのバイト範囲として保存する。
     pub(super) fn body_error<'s, 'p: 's, 'text: 's>(
         &mut self,
@@ -267,21 +286,24 @@ impl<'a> Report<'a> {
             if let AliasDisposition::Duplicate { first } = disposition
                 && let Some(first) = directives.get(*first)
             {
-                self.diagnostics.push(Diagnostic {
-                    severity: "warning",
-                    code: "duplicate_use",
-                    message: "同じ別名と参照先が重複している。".into(),
-                    location: Some(Location {
-                        path: alias.site.source.id.components().join("/"),
-                        range: alias.site.alias.span.clone(),
-                    }),
-                    related: vec![Location {
-                        path: first.site.source.id.components().join("/"),
-                        range: first.site.alias.span.clone(),
-                    }],
-                });
+                self.duplicate_use(&alias.site, &first.site);
             }
         }
+    }
+
+    /// 重複した別名と最初に指定した箇所を保存する。
+    pub(super) fn duplicate_use(&mut self, alias: &UseSite<'_, '_>, first: &UseSite<'_, '_>) {
+        let location = |site: &UseSite<'_, '_>| Location {
+            path: site.source.id.components().join("/"),
+            range: site.alias.span.clone(),
+        };
+        self.diagnostics.push(Diagnostic {
+            severity: "warning",
+            code: "duplicate_use",
+            message: "同じ別名と参照先が重複している。".into(),
+            location: Some(location(alias)),
+            related: vec![location(first)],
+        });
     }
 
     /// 終了コードと同じ成否を JSON に出し、端末用メッセージは内容にだけ含める。
