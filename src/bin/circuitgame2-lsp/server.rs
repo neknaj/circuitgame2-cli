@@ -11,13 +11,13 @@ use circuitgame2_core::editor::{LineIndex, PositionEncoding, TextPosition, apply
 use lsp_server::{ErrorCode, Message, Notification, Request, Response};
 use lsp_types::{
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams, InitializeParams,
-    InitializeResult, OneOf, PositionEncodingKind, PublishDiagnosticsParams, ServerCapabilities,
-    ServerInfo, TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, Uri, VersionedTextDocumentIdentifier,
+    InitializeResult, InlayHintParams, OneOf, PositionEncodingKind, PublishDiagnosticsParams,
+    ServerCapabilities, ServerInfo, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, Uri, VersionedTextDocumentIdentifier,
 };
 
 use super::{
-    definition, diagnostic,
+    definition, diagnostic, inlay_hint,
     sources::{self, OpenDocument, ProjectKey, STANDALONE_ID, SourcePaths, SourceSet},
 };
 
@@ -38,6 +38,7 @@ struct Document {
 }
 
 struct DocumentUpdate {
+    uri: Uri,
     encoding: PositionEncoding,
     syntax: Option<Message>,
 }
@@ -47,6 +48,9 @@ struct Server {
     state: State,
     encoding: Option<PositionEncoding>,
     documents: HashMap<Uri, Document>,
+    inlay_refresh: bool,
+    hint_dependencies: HashMap<Uri, Vec<Uri>>,
+    next_refresh_id: u64,
 }
 
 /// 受信した通知を順に処理し、診断を同じイベント内で確定する。
@@ -66,6 +70,9 @@ pub(super) fn run(input: &mut impl BufRead, output: &mut impl Write) -> io::Resu
                 if let Some(change) = server.notification(notification) {
                     if let Some(syntax) = change.syntax {
                         syntax.write(output)?;
+                    }
+                    if let Some(refresh) = server.refresh_hints(&change.uri) {
+                        refresh.write(output)?;
                     }
                     server.publish_changed(change.encoding, output)?;
                 }
@@ -90,6 +97,7 @@ impl Server {
                 Response::new_ok(request.id, ())
             }
             (State::Ready, "textDocument/definition") => self.definition(request),
+            (State::Ready, "textDocument/inlayHint") => self.settling_hints(request),
             (State::Ready, method) if method != "initialize" => Response::new_err(
                 request.id,
                 ErrorCode::MethodNotFound as i32,
@@ -128,6 +136,11 @@ impl Server {
                 _ => None,
             })
             .unwrap_or((PositionEncodingKind::UTF16, PositionEncoding::Utf16));
+        self.inlay_refresh = parameters
+            .capabilities
+            .workspace
+            .and_then(|workspace| workspace.inlay_hint)
+            .is_some_and(|hint| hint.refresh_support == Some(true));
         self.state = State::AwaitingInitialized;
         self.encoding = Some(encoding);
         Response::new_ok(
@@ -136,6 +149,7 @@ impl Server {
                 capabilities: ServerCapabilities {
                     position_encoding: Some(wire_encoding),
                     definition_provider: Some(OneOf::Left(true)),
+                    inlay_hint_provider: Some(OneOf::Left(true)),
                     text_document_sync: Some(TextDocumentSyncCapability::Options(
                         TextDocumentSyncOptions {
                             open_close: Some(true),
@@ -151,6 +165,53 @@ impl Server {
                 }),
             },
         )
+    }
+
+    fn settling_hints(&mut self, request: Request) -> Response {
+        let params: InlayHintParams = match serde_json::from_value(request.params) {
+            Ok(params) => params,
+            Err(error) => {
+                return Response::new_err(
+                    request.id,
+                    ErrorCode::InvalidParams as i32,
+                    error.to_string(),
+                );
+            }
+        };
+        let positions = text_position(params.range.start).and_then(|start| {
+            let end = text_position(params.range.end)?;
+            Ok((start, end))
+        });
+        let (start, end) = match positions {
+            Ok(positions) => positions,
+            Err(error) => {
+                return Response::new_err(
+                    request.id,
+                    ErrorCode::InvalidParams as i32,
+                    error.into(),
+                );
+            }
+        };
+        let uri = &params.text_document.uri;
+        let (Some(document), Some(encoding)) = (self.documents.get(uri), self.encoding) else {
+            return Response::new_ok(request.id, Vec::<lsp_types::InlayHint>::new());
+        };
+        let open = self
+            .documents
+            .iter()
+            .map(|(uri, document)| document.open_snapshot(uri));
+        let snapshot = inlay_hint::collect(document.open_snapshot(uri), start, end, encoding, open);
+        let hints = match snapshot {
+            Some(snapshot) => {
+                if self.inlay_refresh {
+                    self.hint_dependencies
+                        .insert(uri.clone(), snapshot.dependencies);
+                }
+                snapshot.hints
+            }
+            None => Vec::new(),
+        };
+        Response::new_ok(request.id, hints)
     }
 
     fn definition(&self, request: Request) -> Response {
@@ -190,6 +251,22 @@ impl Server {
         }
     }
 
+    fn refresh_hints(&mut self, uri: &Uri) -> Option<Message> {
+        let before = self.hint_dependencies.len();
+        self.hint_dependencies.retain(|document, dependencies| {
+            document != uri
+                && !dependencies
+                    .iter()
+                    .any(|dependency| sources::same_source_uri(dependency, uri))
+        });
+        if self.hint_dependencies.len() == before {
+            return None;
+        }
+        let id = format!("ncg2:inlay-refresh:{}", self.next_refresh_id);
+        self.next_refresh_id = self.next_refresh_id.wrapping_add(1);
+        Some(Request::new(id.into(), "workspace/inlayHint/refresh".into(), ()).into())
+    }
+
     fn notification(&mut self, notification: Notification) -> Option<DocumentUpdate> {
         match (self.state, notification.method.as_str()) {
             (State::AwaitingInitialized, "initialized") => {
@@ -210,8 +287,12 @@ impl Server {
                     published: None,
                 };
                 let syntax = document.publish_syntax(&item.uri);
-                self.documents.insert(item.uri, document);
-                Some(DocumentUpdate { encoding, syntax })
+                self.documents.insert(item.uri.clone(), document);
+                Some(DocumentUpdate {
+                    uri: item.uri,
+                    encoding,
+                    syntax,
+                })
             }
             (State::Ready, "textDocument/didChange") => {
                 let mut parameters = notification.params;
@@ -232,6 +313,7 @@ impl Server {
                     .map(|text| diagnostic::collect(&item.uri, text, encoding))
                     .unwrap_or_default();
                 Some(DocumentUpdate {
+                    uri: item.uri.clone(),
                     encoding,
                     syntax: document.publish_syntax(&item.uri),
                 })
@@ -241,6 +323,7 @@ impl Server {
                 let uri = params.text_document.uri;
                 self.documents.remove(&uri)?;
                 Some(DocumentUpdate {
+                    uri: uri.clone(),
                     encoding: self.encoding?,
                     syntax: Some(diagnostics_notification(uri, None, Vec::new())),
                 })

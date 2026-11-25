@@ -197,6 +197,148 @@ fn alternate_windows_project_paths_do_not_choose_a_conflicting_overlay() {
     assert_eq!(updates[1]["diagnostics"], json!([]));
 }
 
+#[test]
+fn inlay_hints_follow_the_requested_range_and_latest_edit() {
+    let uri = "untitled:clocked.ncg2";
+    let initial = "(using nor)\n(module entry (in x) (out y) (def y (nor x x)))\n";
+    let edited = "(using nor)\n(module entry (in x) (out y) (def z (nor x x)) (def y (nor z z)))\n";
+    let hint = |id, end| {
+        request(
+            id,
+            "textDocument/inlayHint",
+            json!({"textDocument": {"uri": uri}, "range": {
+                "start": {"line": 1, "character": 0},
+                "end": {"line": 1, "character": end}
+            }}),
+        )
+    };
+    let change = |version, text| {
+        notification(
+            "textDocument/didChange",
+            json!({"textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": text}]}),
+        )
+    };
+    let responses = exchange([
+        request(1, "initialize", json!({"capabilities": {}})),
+        notification("initialized", json!({})),
+        notification(
+            "textDocument/didOpen",
+            json!({"textDocument": {
+                "uri": uri, "languageId": "ncg2", "version": 1, "text": initial
+            }}),
+        ),
+        hint(2, 20),
+        hint(3, 12),
+        change(2, edited),
+        hint(4, 20),
+        change(3, "(using nor)\n(module entry (in x) ("),
+        hint(5, 20),
+        request(6, "shutdown", Value::Null),
+        notification("exit", Value::Null),
+    ]);
+    let response = |id| {
+        &responses
+            .iter()
+            .find(|response| response["id"] == id)
+            .unwrap()["result"]
+    };
+    assert_eq!(response(1)["capabilities"]["inlayHintProvider"], true);
+    let first = &response(2)[0];
+    assert_eq!(first["position"], json!({"line": 1, "character": 13}));
+    assert_eq!(first["label"], "定常化 ≤ 1 tick");
+    assert!(first.get("kind").is_none());
+    assert!(first.get("textEdits").is_none());
+    assert_eq!(response(3), &json!([]));
+    assert_eq!(response(4)[0]["label"], "定常化 ≤ 2 tick");
+    assert_eq!(response(5), &json!([]));
+}
+
+#[test]
+fn inlay_hint_refreshes_when_an_open_dependency_changes() {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/project");
+    let basis = Url::from_file_path(project.join("basis.ncg2")).unwrap();
+    let main = Url::from_file_path(project.join("main.ncg2")).unwrap();
+    let spelling = if cfg!(windows) {
+        "/BASIS.ncg2"
+    } else {
+        "/%62asis.ncg2"
+    };
+    let alias = Url::parse(&basis.as_str().replace("/basis.ncg2", spelling)).unwrap();
+    let open = |uri: &Url, text| {
+        notification(
+            "textDocument/didOpen",
+            json!({"textDocument": {"uri": uri.as_str(), "languageId": "ncg2", "version": 1, "text": text}}),
+        )
+    };
+    let hint = |id| {
+        request(
+            id,
+            "textDocument/inlayHint",
+            json!({"textDocument": {"uri": main.as_str()}, "range": {
+                "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 20}
+            }}),
+        )
+    };
+    let responses = exchange([
+        request(
+            1,
+            "initialize",
+            json!({"capabilities": {"workspace": {"inlayHint": {"refreshSupport": true}}}}),
+        ),
+        notification("initialized", json!({})),
+        open(
+            &basis,
+            "(using nor) (namespace lib (export forward) (func forward (in x) (out y) (def y (nor x x))))",
+        ),
+        open(
+            &main,
+            "(module top (in x) (out y) (def y (::lib::forward x)))",
+        ),
+        hint(2),
+        notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": basis.as_str(), "version": 2},
+                "contentChanges": [{"text": "(using nor) (namespace lib (export forward) (func forward (in x) (out y) (def z (nor x x)) (def y (nor z z))))"}]
+            }),
+        ),
+        hint(3),
+        notification(
+            "textDocument/didClose",
+            json!({"textDocument": {"uri": basis.as_str()}}),
+        ),
+        hint(4),
+        open(
+            &alias,
+            "(using nor) (namespace lib (export forward) (func forward (in x) (out y) (def y (nor x x))))",
+        ),
+        hint(5),
+        request(6, "shutdown", Value::Null),
+        notification("exit", Value::Null),
+    ]);
+    let at = |id| {
+        responses
+            .iter()
+            .position(|response| response["id"] == id)
+            .unwrap()
+    };
+    let refreshed = responses
+        .iter()
+        .position(|response| response["method"] == "workspace/inlayHint/refresh")
+        .unwrap();
+    assert!(at(2) < refreshed && refreshed < at(3), "{responses:?}");
+    assert_eq!(responses[at(2)]["result"][0]["label"], "定常化 ≤ 1 tick");
+    assert_eq!(responses[at(3)]["result"][0]["label"], "定常化 ≤ 2 tick");
+    assert_eq!(responses[at(4)]["result"], json!([]));
+    assert!(
+        responses[at(4) + 1..at(5)]
+            .iter()
+            .any(|response| response["method"] == "workspace/inlayHint/refresh"),
+        "{responses:?}"
+    );
+    assert_eq!(responses[at(5)]["result"][0]["label"], "定常化 ≤ 1 tick");
+}
+
 fn exchange(messages: impl IntoIterator<Item = Message>) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_circuitgame2-lsp"))
         .stdin(Stdio::piped())

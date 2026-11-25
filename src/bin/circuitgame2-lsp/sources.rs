@@ -168,6 +168,11 @@ impl<'a> SourceSet<'a> {
         })
     }
 
+    /// 解析に使う文書の URI を返す。
+    pub(super) fn uris(&self) -> impl Iterator<Item = &Uri> {
+        self.sources.iter().map(|source| &source.uri)
+    }
+
     /// Core に渡す本文と版を、識別子に対応させる。
     pub(super) fn snapshots(&self) -> Vec<SourceSnapshot<'_>> {
         self.sources
@@ -378,6 +383,26 @@ fn on_disk<'a>(id: String, path: &Path) -> Result<Source<'a>, String> {
         revision: 0,
         origin: SourceOrigin::Disk(path.to_path_buf()),
     })
+}
+
+/// URI の表記が変わっても、依存先として同じファイルかを確かめる。
+pub(super) fn same_source_uri(left: &Uri, right: &Uri) -> bool {
+    if left == right {
+        return true;
+    }
+    let (Some(left), Some(right)) = (file_path(left), file_path(right)) else {
+        return false;
+    };
+    if left == right {
+        return true;
+    }
+    #[cfg(windows)]
+    return fs::canonicalize(left)
+        .ok()
+        .zip(fs::canonicalize(right).ok())
+        .is_some_and(|(left, right)| left == right);
+    #[cfg(not(windows))]
+    false
 }
 
 fn file_path(uri: &Uri) -> Option<PathBuf> {

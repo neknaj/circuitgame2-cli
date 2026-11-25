@@ -3,21 +3,12 @@
 use std::{io::Write, path::Path};
 
 use circuitgame2_core::project::{
-    CircuitProject, ClockedModuleVmLimits, ClockedVramVm, ModuleBodyPosition, UseAliases,
-    VramDeclaration, VramSetupError,
+    CircuitProject, ClockedVramVm, ModuleBodyPosition, UseAliases, VramDeclaration, VramSetupError,
 };
 
-use super::{
-    BIT_LIMIT, GATE_LIMIT, WIDTH_LIMIT, config, diagnostic, format_bits, input_bits, output_error,
-    validate_input,
-};
+use super::{config, diagnostic, format_bits, input_bits, output_error, validate_input};
 
-pub(super) const LIMITS: ClockedModuleVmLimits = ClockedModuleVmLimits {
-    width: WIDTH_LIMIT,
-    wiring_bits: BIT_LIMIT,
-    gates: GATE_LIMIT,
-    state_bits: 1_048_576,
-};
+pub(super) use circuitgame2_cli::CLOCKED_LIMITS as LIMITS;
 
 /// 実行するモジュール、入力列、出力に加える VRAM の指定。
 pub(super) struct TraceOptions<'a> {

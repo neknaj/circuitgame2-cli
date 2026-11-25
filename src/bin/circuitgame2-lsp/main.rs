@@ -7,6 +7,8 @@ mod definition;
 #[cfg(not(target_os = "wasi"))]
 mod diagnostic;
 #[cfg(not(target_os = "wasi"))]
+mod inlay_hint;
+#[cfg(not(target_os = "wasi"))]
 mod server;
 #[cfg(not(target_os = "wasi"))]
 mod sources;
