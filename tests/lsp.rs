@@ -468,6 +468,16 @@ fn inlay_hint_refreshes_when_an_open_dependency_changes() {
             }}),
         )
     };
+    let main_source = "(module top (in x) (out y) (def y (::lib::forward x)))";
+    let definition = |id| {
+        request(
+            id,
+            "textDocument/definition",
+            json!({"textDocument": {"uri": main.as_str()}, "position": {
+                "line": 0, "character": main_source.find("::lib::forward").unwrap()
+            }}),
+        )
+    };
     let responses = exchange([
         request(
             1,
@@ -479,11 +489,9 @@ fn inlay_hint_refreshes_when_an_open_dependency_changes() {
             &basis,
             "(using nor) (namespace lib (export forward) (func forward (in x) (out y) (def y (nor x x))))",
         ),
-        open(
-            &main,
-            "(module top (in x) (out y) (def y (::lib::forward x)))",
-        ),
+        open(&main, main_source),
         hint(2),
+        definition(7),
         notification(
             "textDocument/didChange",
             json!({
@@ -497,11 +505,13 @@ fn inlay_hint_refreshes_when_an_open_dependency_changes() {
             json!({"textDocument": {"uri": basis.as_str()}}),
         ),
         hint(4),
+        definition(8),
         open(
             &alias,
             "(using nor) (namespace lib (export forward) (func forward (in x) (out y) (def y (nor x x))))",
         ),
         hint(5),
+        definition(9),
         request(6, "shutdown", Value::Null),
         notification("exit", Value::Null),
     ]);
@@ -526,6 +536,12 @@ fn inlay_hint_refreshes_when_an_open_dependency_changes() {
         "{responses:?}"
     );
     assert_eq!(responses[at(5)]["result"][0]["label"], "定常化 ≤ 1 tick");
+    let target = &responses[at(7)]["result"];
+    assert_eq!(target["uri"], basis.as_str());
+    assert!(responses[at(8)]["result"].is_null());
+    let reopened = &responses[at(9)]["result"];
+    assert_eq!(reopened["uri"], alias.as_str());
+    assert_eq!(reopened["range"], target["range"]);
 }
 
 #[test]
