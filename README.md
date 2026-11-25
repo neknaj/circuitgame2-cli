@@ -194,7 +194,7 @@ ncg2 run --project examples/vram/circuitgame2.toml --vram screen --input 1101 --
 ncg2 rp-plan --project circuitgame2.toml --board board.toml
 ```
 
-Pico または Pico 2 向けに回路と端子の割り当てを検査し、配線表を標準出力へ書く。対象は単一ビットの入出力を持つ順序 NOR 回路。`tick-ns` は正の整数マイクロ秒で表し、各回路入力を GPIO または UART の一つの信号で駆動する。 [GPIO の設定とビルドの例](https://github.com/neknaj/circuitgame2/tree/main/examples/rp-gpio)
+Pico または Pico 2 向けに回路と端子の割り当てを検査し、配線表を標準出力へ書く。対象は単一ビットの入出力を持つ順序 NOR 回路。`tick-ns` は正の整数マイクロ秒で表す。各回路入力には GPIO、UART、I²C のいずれかの信号を一つ割り当てる。 [GPIO の設定とビルドの例](https://github.com/neknaj/circuitgame2/tree/main/examples/rp-gpio)
 
 UART を使う場合は `board.toml` に `[uart]` を追加する。各ポート名をルート回路の宣言に合わせ、データのビットは最下位から並べる。
 
@@ -218,6 +218,15 @@ tx-done-ready = "tx-done-ready"
 ```
 
 生成した UART 配線表を使う場合は、ファームウェアのビルドに `uart` feature を追加する。 [RP ファームウェアのビルドと信号の扱い](https://github.com/neknaj/circuitgame2-core/tree/main/firmware/rp)
+
+I²C を使う場合は `board.toml` に `[i2c]` を追加する。同じ配線表で選べる周辺機能は UART または I²C の一方で、GPIO は併用できる。`instance` に `0` または `1`、`sda-pin` と `scl-pin` に GP 番号、`frequency-hz` に `100000` または `400000`、`timeout-micros` に正の整数を指定する。
+
+| 回路から見た方向 | 単一ビットのポート | ポート名の配列 |
+| --- | --- | --- |
+| 入力 | `request-ready`、`response-valid` | `response-status`（3個）、`read-data` |
+| 出力 | `request-valid`、`response-ready` | `address`（7個）、`write-length` と `read-length`（各8個）、`write-data` |
+
+整数のビットは最下位から並べる。`read-data` と `write-data` の容量は同じにし、1〜255 バイト分のポート名を指定する。データのポート名は先頭バイトから並べ、各バイトも最下位ビットから指定する。 [RP バックエンドの信号と tick の規則](https://neknaj.github.io/circuitgame2/docs/backends.html)
 
 ## NOR ゲート数を調べる
 
