@@ -369,6 +369,110 @@ fn mixed_check_reports_wiring_and_output_count_with_related_ranges() {
 }
 
 #[test]
+fn mixed_check_reports_nested_input_and_output_types_with_original_ranges() {
+    let folder = tempfile::tempdir().unwrap();
+    let dir = folder.path();
+    let settings = dir.join("circuitgame2.toml");
+    let main = dir.join("main.ncg2");
+    fs::write(
+        &settings,
+        "sources = [\"main.ncg2\", \"library.ncg2\", \"helper.ncg2m\"]\n",
+    )
+    .unwrap();
+    let library = "; 型の宣言\n(namespace lib (export byte nibble)
+        (func byte (in (x (bits 8))) (out (x (bits 8))))
+        (func nibble (in (x (bits 4))) (out (x (bits 4)))))";
+    fs::write(dir.join("library.ncg2"), library).unwrap();
+    fs::write(dir.join("helper.ncg2m"), "; 補助関数\n").unwrap();
+    let check = |source: &str| {
+        fs::write(&main, source).unwrap();
+        let result = cli(&[
+            "check",
+            "--format",
+            "json",
+            "--project",
+            settings.to_str().unwrap(),
+        ]);
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert!(result.stderr.is_empty());
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["files"], 3);
+        assert_eq!(report["diagnostics"].as_array().unwrap().len(), 1);
+        report["diagnostics"][0].clone()
+    };
+    let location = |path: &str, start, len| {
+        serde_json::json!({
+            "path": path, "range": {"start": start, "end": start + len}
+        })
+    };
+    let eight = library.find("(bits 8)").unwrap() + "(bits ".len();
+    let four = library.rfind("(bits 4)").unwrap() + "(bits ".len();
+    let inner = "(::lib::nibble a)";
+
+    let input = format!(
+        "; 入力 🐈\n(using nor) (func gate (in (a (bits 4))) (out (y (bits 8))) (def y (::lib::byte {inner})))"
+    );
+    let error = check(&input);
+    assert_eq!(error["code"], "call_argument");
+    assert_eq!(
+        error["location"],
+        location("main.ncg2", input.find(inner).unwrap(), inner.len())
+    );
+    assert_eq!(
+        error["related"],
+        serde_json::json!([
+            location("library.ncg2", eight, 1),
+            location("library.ncg2", four, 1)
+        ])
+    );
+
+    let output = format!(
+        "; 出力 🐈\n(using nor) (func gate (in (a (bits 4))) (out (y (bits 8))) (def y {inner}))"
+    );
+    let error = check(&output);
+    assert_eq!(error["code"], "output_type_mismatch");
+    assert_eq!(
+        error["location"],
+        location("main.ncg2", output.rfind("y (").unwrap(), 1)
+    );
+    assert_eq!(
+        error["related"],
+        serde_json::json!([
+            location(
+                "main.ncg2",
+                output.find("(bits 8)").unwrap() + "(bits ".len(),
+                1
+            ),
+            location("library.ncg2", four, 1),
+            location("main.ncg2", output.find(inner).unwrap(), inner.len()),
+        ])
+    );
+
+    let expression = "(slice a 0 8)";
+    let pending = format!(
+        "(using nor) (func gate (in (a (bits 8))) (out (y (bits 8))) (def y (::lib::byte {expression})))"
+    );
+    let error = check(&pending);
+    assert_eq!(error["code"], "unsupported_mixed_circuit_check");
+    assert_eq!(
+        error["location"],
+        location(
+            "main.ncg2",
+            pending.find(expression).unwrap(),
+            expression.len()
+        )
+    );
+
+    let matching = "(using nor) (func gate (in (a (bits 8))) (out (y (bits 8))) (def y (::lib::byte (::lib::byte a))))";
+    let error = check(matching);
+    assert_eq!(error["code"], "unsupported_mixed_circuit_check");
+    assert_eq!(
+        error["location"],
+        location("main.ncg2", matching.find("gate").unwrap(), "gate".len())
+    );
+}
+
+#[test]
 fn mixed_check_reports_basis_errors_before_resolving_names() {
     let folder = tempfile::tempdir().unwrap();
     let dir = folder.path();

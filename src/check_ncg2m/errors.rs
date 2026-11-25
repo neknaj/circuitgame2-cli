@@ -14,12 +14,12 @@ use circuitgame2_core::{
         integers::{IntegerLiteralError, IntegerOperation, IntegerType},
     },
     project::{
-        CircuitProjectError, DefnCallError, DefnCallGraphError, DefnNameError, FuncArityError,
-        FuncCallTarget, FuncLiteralError, FuncSignalTypeError, FuncWiringError, LocatedName,
-        MixedFuncArityError, MixedFuncCallError, MixedFuncCalleeError, MixedFuncDriverError,
-        MixedFuncWiringError, MixedTypedSignatureError, ParsedProjectSources,
-        ProjectFileSyntaxError, ProjectSource, ProjectSourceParseError, RoutineSignatureError,
-        TypedSignatureError,
+        CallInputError, CallInputReason, CircuitProjectError, DefnCallError, DefnCallGraphError,
+        DefnNameError, FuncArityError, FuncCallOutputError, FuncCallTarget, FuncLiteralError,
+        FuncSignalTypeError, FuncWiringError, LocatedName, MixedFuncArityError, MixedFuncCallError,
+        MixedFuncCalleeError, MixedFuncDriverError, MixedFuncTypeError, MixedFuncWiringError,
+        MixedTypedSignatureError, ParsedProjectSources, ProjectFileSyntaxError, ProjectSource,
+        ProjectSourceParseError, RoutineSignatureError, TypedSignatureError,
     },
 };
 
@@ -65,8 +65,113 @@ pub(super) fn parse(
     diagnostic::project_error(error)
 }
 
+/// 呼び出し元と宣言元の範囲を保って混在関数の型診断を表示する。
+pub(super) fn mixed_function_types(
+    function: &LocatedName<'_, '_>,
+    error: MixedFuncTypeError<'_, '_>,
+    report: &mut Option<&mut Report<'_>>,
+) -> String {
+    match error {
+        MixedFuncTypeError::Arity(error) => mixed_function(function, error, report),
+        MixedFuncTypeError::Literal(FuncLiteralError::Width {
+            literal,
+            required_at,
+            reason,
+        }) => failure(
+            report,
+            "literal_width",
+            literal,
+            &diagnostic::clocked::literal_width_error(reason),
+            required_at.map(|required| ("必要な幅の指定", required)),
+        ),
+        MixedFuncTypeError::Literal(error) => {
+            check_body::function_error(function, FuncSignalTypeError::Literal(error), report)
+        }
+        MixedFuncTypeError::Signature { call, error } => {
+            mixed_signature(error, Some(site(call.source, call.call.span)), report)
+        }
+        MixedFuncTypeError::Output(FuncCallOutputError::OutputType {
+            target,
+            call,
+            expected,
+            actual,
+        }) => {
+            let call = (!same_location(&call, &actual.origin)).then_some(("呼び出し式", call));
+            failure(
+                report,
+                "output_type_mismatch",
+                target,
+                &format!(
+                    "出力の宣言型は {} だが、呼び出しが返す型は {}。",
+                    diagnostic::clocked::port_type(expected.ty),
+                    diagnostic::clocked::port_type(actual.ty),
+                ),
+                [
+                    ("出力の型", expected.origin),
+                    ("呼び出しが返す型", actual.origin),
+                ]
+                .into_iter()
+                .chain(call),
+            )
+        }
+        MixedFuncTypeError::Output(error) => {
+            check_body::function_error(function, FuncSignalTypeError::CallOutput(error), report)
+        }
+        MixedFuncTypeError::Signal(error) => {
+            check_body::function_error(function, FuncSignalTypeError::Signal(error), report)
+        }
+        MixedFuncTypeError::Input(CallInputError::Argument {
+            argument,
+            expected,
+            required_at,
+            reason,
+            ..
+        }) => {
+            let required = required_at.map(|required| ("入力の型", required));
+            let (reason, actual) = match reason {
+                CallInputReason::LiteralWidth(error) => {
+                    (diagnostic::clocked::literal_width_error(error), None)
+                }
+                CallInputReason::StructRequired => ("構造体の値を指定する。".into(), None),
+                CallInputReason::SignalType(actual) => (
+                    format!(
+                        "実引数の型は {}。",
+                        diagnostic::clocked::port_type(actual.ty)
+                    ),
+                    (!same_location(&argument, &actual.origin))
+                        .then_some(("実引数の型の根拠", actual.origin)),
+                ),
+            };
+            failure(
+                report,
+                "call_argument",
+                argument,
+                &format!(
+                    "入力には {} が必要。{reason}",
+                    diagnostic::clocked::port_type(expected),
+                ),
+                required.into_iter().chain(actual),
+            )
+        }
+        MixedFuncTypeError::Input(CallInputError::Caller(error)) => {
+            check_body::function_error(function, FuncSignalTypeError::Signal(error), report)
+        }
+        MixedFuncTypeError::Input(_) => failure(
+            report,
+            "function_check",
+            site(function.source, function.span.clone()),
+            "関数の呼び出しの入力に違反がある。",
+            [],
+        ),
+    }
+}
+
+fn same_location(left: &LocatedName<'_, '_>, right: &LocatedName<'_, '_>) -> bool {
+    std::ptr::eq(left.source, right.source) && left.span == right.span
+}
+
 /// 混在プロジェクトの関数で Core が選んだ違反を、関連するソース位置とともに表示する。
-pub(super) fn mixed_function(
+fn mixed_function(
     function: &LocatedName<'_, '_>,
     error: MixedFuncArityError<'_, '_>,
     report: &mut Option<&mut Report<'_>>,
@@ -78,6 +183,7 @@ pub(super) fn mixed_function(
                 reason,
                 "呼び出し先の回路関数が見つからない。",
                 "呼び出し先に回路関数を指定する。",
+                None,
                 report,
             );
         }
@@ -89,7 +195,7 @@ pub(super) fn mixed_function(
         )) => FuncArityError::Wiring(FuncWiringError::Driver(error)),
         MixedFuncArityError::Wiring(MixedFuncWiringError::Driver(
             MixedFuncDriverError::Signature(error),
-        )) => return mixed_signature(error, report),
+        )) => return mixed_signature(error, None, report),
         MixedFuncArityError::Count(FuncArityError::OutputCount {
             expression,
             left,
@@ -134,10 +240,12 @@ pub(super) fn mixed_function(
     )
 }
 
-fn mixed_signature(
-    error: MixedTypedSignatureError<'_, '_>,
+fn mixed_signature<'p, 'a>(
+    error: MixedTypedSignatureError<'p, 'a>,
+    caller: Option<LocatedName<'p, 'a>>,
     report: &mut Option<&mut Report<'_>>,
 ) -> String {
+    let caller = caller.map(|call| ("呼び出し式", call));
     let signature = match error {
         MixedTypedSignatureError::Signature(error)
         | MixedTypedSignatureError::Shared(TypedSignatureError::Signature(error)) => error,
@@ -149,6 +257,7 @@ fn mixed_signature(
                 reason,
                 "ポートの型名が指す構造体が見つからない。",
                 "ポートの型名に構造体を指定する。",
+                caller,
                 report,
             );
         }
@@ -165,7 +274,7 @@ fn mixed_signature(
                     diagnostic::clocked::port_type(input.ty),
                     diagnostic::clocked::port_type(output.ty)
                 ),
-                [("入力の型", input.annotation)],
+                [("入力の型", input.annotation)].into_iter().chain(caller),
             );
         }
         MixedTypedSignatureError::Shared(TypedSignatureError::TypeReference {
@@ -176,7 +285,7 @@ fn mixed_signature(
                 "function_signature",
                 reference,
                 "ポートの型名を解決できない。",
-                [],
+                caller,
             );
         }
     };
@@ -188,7 +297,7 @@ fn mixed_signature(
                 "port_width",
                 site(error.source, error.span),
                 &reason,
-                [],
+                caller,
             )
         }
         RoutineSignatureError::Duplicate { first, later, .. } => failure(
@@ -196,7 +305,7 @@ fn mixed_signature(
             "duplicate_port",
             later,
             "このポート名が重複している。",
-            [("最初の指定", first)],
+            [("最初の指定", first)].into_iter().chain(caller),
         ),
         RoutineSignatureError::SharedWidthMismatch {
             expected,
@@ -208,16 +317,17 @@ fn mixed_signature(
             "shared_port_width",
             output,
             &format!("出力は {expected} ビットを必要とするが、入力は {actual} ビット。"),
-            [("入力の幅", input)],
+            [("入力の幅", input)].into_iter().chain(caller),
         ),
     }
 }
 
-fn circuit_reference(
-    reference: LocatedName<'_, '_>,
-    reason: MixedFuncCalleeError<'_, '_>,
+fn circuit_reference<'p, 'a>(
+    reference: LocatedName<'p, 'a>,
+    reason: MixedFuncCalleeError<'p, 'a>,
     missing: &str,
     expected: &str,
+    caller: Option<(&'static str, LocatedName<'p, 'a>)>,
     report: &mut Option<&mut Report<'_>>,
 ) -> String {
     let (code, message, related) = match reason {
@@ -248,7 +358,13 @@ fn circuit_reference(
             Some(("名前が指す宣言", declaration.name)),
         ),
     };
-    failure(report, code, reference, message, related)
+    failure(
+        report,
+        code,
+        reference,
+        message,
+        related.into_iter().chain(caller),
+    )
 }
 
 pub(super) fn calls(
