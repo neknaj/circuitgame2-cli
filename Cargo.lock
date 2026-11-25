@@ -37,7 +37,7 @@ dependencies = [
 [[package]]
 name = "circuitgame2-core"
 version = "0.1.0"
-source = "git+https://github.com/neknaj/circuitgame2-core?rev=00889c4c3cbd8f62f0c6f123af1f220ce807815f#00889c4c3cbd8f62f0c6f123af1f220ce807815f"
+source = "git+https://github.com/neknaj/circuitgame2-core?rev=4fbf656773657f29ac114b7362b10a93dfe0190f#4fbf656773657f29ac114b7362b10a93dfe0190f"
 dependencies = [
  "circuitgame2-syntax",
  "vstd",
@@ -46,7 +46,7 @@ dependencies = [
 [[package]]
 name = "circuitgame2-project-config"
 version = "0.1.0"
-source = "git+https://github.com/neknaj/circuitgame2-core?rev=00889c4c3cbd8f62f0c6f123af1f220ce807815f#00889c4c3cbd8f62f0c6f123af1f220ce807815f"
+source = "git+https://github.com/neknaj/circuitgame2-core?rev=4fbf656773657f29ac114b7362b10a93dfe0190f#4fbf656773657f29ac114b7362b10a93dfe0190f"
 dependencies = [
  "serde",
  "toml",
@@ -55,7 +55,7 @@ dependencies = [
 [[package]]
 name = "circuitgame2-syntax"
 version = "0.1.0"
-source = "git+https://github.com/neknaj/circuitgame2-core?rev=00889c4c3cbd8f62f0c6f123af1f220ce807815f#00889c4c3cbd8f62f0c6f123af1f220ce807815f"
+source = "git+https://github.com/neknaj/circuitgame2-core?rev=4fbf656773657f29ac114b7362b10a93dfe0190f#4fbf656773657f29ac114b7362b10a93dfe0190f"
 dependencies = [
  "vstd",
 ]

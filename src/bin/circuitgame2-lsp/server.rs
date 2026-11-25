@@ -460,7 +460,7 @@ impl Server {
                     return None;
                 }
                 let encoding = self.encoding?;
-                let analysis = CachedCircuitRecovery::analyze(item.text);
+                let analysis = CachedCircuitRecovery::analyze_with_build_index(item.text);
                 let mut document = Document {
                     version: item.version,
                     syntax: diagnostic::collect(&item.uri, &analysis, encoding),
@@ -680,7 +680,7 @@ impl Document {
             self.syntax = syntax;
             self.analysis = Some(DocumentAnalysis::Local { text, recovery });
         } else {
-            let analysis = CachedCircuitRecovery::analyze(text);
+            let analysis = CachedCircuitRecovery::analyze_with_build_index(text);
             self.syntax = diagnostic::collect(uri, &analysis, encoding);
             self.analysis = Some(DocumentAnalysis::Full(analysis));
         }

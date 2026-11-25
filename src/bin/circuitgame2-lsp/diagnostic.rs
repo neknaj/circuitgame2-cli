@@ -6,7 +6,7 @@ use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding, TextPosition},
     project::{
         DefinitionBatchError, DefinitionReferenceReason, LocatedName, check_use_aliases,
-        index_use_targets, parse_circuit_project, validate_circuit_basis,
+        index_use_targets, parse_circuit_project_with_cached_indexes, validate_circuit_basis,
     },
     syntax::{
         ErrorKind, Repair,
@@ -118,7 +118,9 @@ pub(super) fn collect_references(
     encoding: PositionEncoding,
 ) -> Vec<(Uri, Diagnostic)> {
     let snapshots = sources.snapshots();
-    let Ok(project) = parse_circuit_project(&snapshots) else {
+    let Ok(project) =
+        parse_circuit_project_with_cached_indexes(&snapshots, &sources.syntax_cache())
+    else {
         return Vec::new();
     };
     if validate_circuit_basis(&project).is_err() {
