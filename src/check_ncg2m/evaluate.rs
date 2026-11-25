@@ -72,8 +72,9 @@ pub(in super::super) fn parse_argument(value: &str, number: usize) -> Result<Sca
 
 /// ルート名前空間から宣言を解決し、型と引数を検査して値を一行で返す。
 ///
-/// fuel を指定した場合は、その回数まで評価する。その範囲で一時停止した場合、
-/// 値を出力せず終了コード 2 を返す。指定を省いた場合は、終端まで実行枠を与える。
+/// fuel を指定した場合は、その回数まで評価する。その範囲で一時停止した場合は
+/// 標準出力に値を書かず、呼び出し元にコード 2 の `ExitCode` を返す。
+/// WASI Preview 2 のホストには失敗として伝わる。fuel を省いた場合は、終端まで実行枠を与える。
 /// Unix と Windows では Ctrl+C を実行枠の区切りで確認し、終了コード 130 を返す。
 pub(in super::super) fn evaluate(
     snapshots: &[SourceSnapshot<'_>],
