@@ -76,11 +76,14 @@ pub(in super::super) fn parse_argument(value: &str, number: usize) -> Result<Sca
 /// 標準出力に値を書かず、呼び出し元にコード 2 の `ExitCode` を返す。
 /// WASI Preview 2 のホストには失敗として伝わる。fuel を省いた場合は、終端まで実行枠を与える。
 /// Unix と Windows では Ctrl+C を実行枠の区切りで確認し、終了コード 130 を返す。
+/// `--steps` を指定すると、成功、失敗、中断までの実行済み遷移数を標準エラー出力に書く。
+/// ソースや引数の検査に失敗し、評価を始めなかった場合は回数を表示しない。
 pub(in super::super) fn evaluate(
     snapshots: &[SourceSnapshot<'_>],
     name: &str,
     arguments: Vec<ScalarValue>,
     fuel: Option<NonZeroU64>,
+    show_steps: bool,
     stdout: &mut impl Write,
     contextualize: impl Fn(String) -> String,
 ) -> Result<ExitCode, String> {
@@ -143,38 +146,52 @@ pub(in super::super) fn evaluate(
         .map_err(|error| contextualize(binding_error(error)))?;
     let interrupted = interruption()?;
     let mut remaining = fuel;
-    loop {
+    let mut steps = show_steps.then_some(0_u128);
+    let result = loop {
         // fuel の総回数を守りながら、枠の区切りで中断要求を確認する。
         let count = remaining.map_or(SLICE, |available| available.get().min(SLICE));
         let slice = NonZeroUsize::new(count as usize).expect("1..=4096 steps fit usize");
-        let step = state.run_slice(slice);
+        let step = if let Some(total) = &mut steps {
+            let (step, used) = state.run_slice_with_steps(slice);
+            *total = total
+                .checked_add(used as u128)
+                .ok_or("評価ステップ数が表示できる範囲を超えた。")?;
+            step
+        } else {
+            state.run_slice(slice)
+        };
         if interrupted() {
             eprintln!("補助関数の評価を中断した。");
-            return Ok(ExitCode::from(130));
+            break Ok(ExitCode::from(130));
         }
         match step {
             Ok(ScalarExecutionSlice::Complete(value)) => {
-                match value {
+                let written = match value {
                     ScalarValue::Bool(value) => writeln!(stdout, "{value}"),
                     ScalarValue::Integer(IntegerValue::Nat(value)) => writeln!(stdout, "{value}"),
                     ScalarValue::Integer(IntegerValue::Int(value)) => writeln!(stdout, "{value}"),
-                }
-                .map_err(super::super::output_error)?;
-                return Ok(ExitCode::SUCCESS);
+                };
+                break written
+                    .map(|()| ExitCode::SUCCESS)
+                    .map_err(super::super::output_error);
             }
             Ok(ScalarExecutionSlice::Suspended(next)) => {
                 if let Some(available) = remaining {
                     remaining = NonZeroU64::new(available.get() - count);
                     if remaining.is_none() {
                         eprintln!("指定した fuel の範囲で評価が完了しなかった。");
-                        return Ok(ExitCode::from(2));
+                        break Ok(ExitCode::from(2));
                     }
                 }
                 state = next;
             }
-            Err(error) => return Err(contextualize(execution_error(error))),
+            Err(error) => break Err(contextualize(execution_error(error))),
         }
+    };
+    if let Some(steps) = steps {
+        eprintln!("steps={steps}");
     }
+    result
 }
 
 fn binding_error(error: ScalarBindingError<'_, '_>) -> String {

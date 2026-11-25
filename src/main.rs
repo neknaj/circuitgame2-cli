@@ -43,8 +43,8 @@ const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価して�
   ncg2 fmt [--check | --write] <ファイル>\n\
   ncg2 eval --func <関数名> --input <ビット列> <ファイル>...\n\
   ncg2 eval --func <関数名> --input <ビット列> --project <設定ファイル>\n\
-  ncg2 eval-meta --defn <名前> [--arg <値>]... [--fuel <回数>] <ファイル>...\n\
-  ncg2 eval-meta --defn <名前> [--arg <値>]... [--fuel <回数>] --project <設定ファイル>\n\
+  ncg2 eval-meta --defn <名前> [--arg <値>]... [--fuel <回数>] [--steps] <ファイル>...\n\
+  ncg2 eval-meta --defn <名前> [--arg <値>]... [--fuel <回数>] [--steps] --project <設定ファイル>\n\
   ncg2 run [--entry <モジュール名>] [--input <ビット列> ... | --ticks <回数>] <ファイル>...\n\
   ncg2 run --project <設定ファイル> [--input <ビット列> ... | --ticks <回数>] [--vram <公開名>]...\n\
   ncg2 settle [--within <tick 数> [--period <間隔>]] [--entry <モジュール名>] <ファイル>...\n\
@@ -58,6 +58,7 @@ const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価して�
 run と settle の --project はソースファイルの列挙や --entry と併用できない。\n\
 宣言名には ::gate や ::lib::gate のような完全修飾名を使う。\n\
 eval-meta の --arg は true、false、Nat:<十進整数>、Int:<十進整数>。\n\
+eval-meta の --steps は実行した評価ステップ数を標準エラー出力に表示する。\n\
 run の既定の開始点は ::main。--input 一つにつき 1 tick 進める。\n\
 入力ポートがない回路は --ticks <回数> で指定回数だけ進める。--input= でも 1 tick 進められる。\n\
 --ticks と --input は併用できない。--ticks 0 は reset 直後の出力だけを表示する。\n\
@@ -100,6 +101,7 @@ enum Command<'a> {
         name: &'a str,
         arguments: Vec<ScalarValue>,
         fuel: Option<NonZeroU64>,
+        steps: bool,
         sources: SourceInput<'a>,
     },
     Run {
@@ -374,6 +376,7 @@ fn eval_meta_command(args: &[String]) -> Result<Command<'_>, String> {
     let mut remaining = rest;
     let mut arguments = Vec::new();
     let mut fuel = None;
+    let mut steps = false;
     while let Some((option, rest)) = remaining.split_first() {
         match option.as_str() {
             "--arg" => {
@@ -386,6 +389,10 @@ fn eval_meta_command(args: &[String]) -> Result<Command<'_>, String> {
                 fuel = Some(value.parse().map_err(|_| "--fuel に正の回数を指定する。")?);
                 remaining = next;
             }
+            "--steps" if !steps => {
+                steps = true;
+                remaining = rest;
+            }
             "--project" | "--" => break,
             option if option.starts_with('-') => {
                 return Err(format!("eval-meta のオプション {option} を確認する。"));
@@ -397,6 +404,7 @@ fn eval_meta_command(args: &[String]) -> Result<Command<'_>, String> {
         name,
         arguments,
         fuel,
+        steps,
         sources: source_input(remaining)?,
     })
 }
@@ -695,10 +703,19 @@ fn execute(
         name,
         arguments,
         fuel,
+        steps,
         ..
     } = command
     {
-        return check_ncg2m::evaluate(&snapshots, name, arguments, fuel, stdout, source_diagnostic);
+        return check_ncg2m::evaluate(
+            &snapshots,
+            name,
+            arguments,
+            fuel,
+            steps,
+            stdout,
+            source_diagnostic,
+        );
     }
     if check_ncg2m
         && sources

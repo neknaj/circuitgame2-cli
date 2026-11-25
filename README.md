@@ -60,6 +60,12 @@ ncg2 eval-meta --defn ::startup-ready examples/helpers.ncg2m
 
 `--fuel` で指定した回数で評価が終わらなければ、標準エラー出力にその旨を表示し、値を出さずに終了する。終了状態はネイティブ版ではコード 2、WASI Preview 2 版では失敗となる。Unix と Windows では Ctrl+C で評価を中断できる。中断した場合は標準出力に値を書かず、終了コード 130 を返す。
 
+```sh
+ncg2 eval-meta --defn ::startup-ready --steps examples/helpers.ncg2m
+```
+
+`--steps` を付けると、評価器が実行した遷移の合計を標準エラー出力に `steps=<数>` の形式で表示する。完了や評価エラーを返した最後の遷移も数える。fuel の使い切りや Ctrl+C で中断した場合は、その時点までの回数を表示する。構文や引数の検査は集計の対象外で、評価を始める前に失敗した場合は回数を表示しない。この回数の単位は NCG2M 評価器の遷移であり、実行時間や Wasmtime の fuel とは異なる。
+
 ## 順序回路を動かす
 
 ```sh

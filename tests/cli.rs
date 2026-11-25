@@ -1,14 +1,18 @@
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
 const BIN: &str = env!("CARGO_BIN_EXE_ncg2");
 
 fn cli(args: &[&str]) -> Output {
+    cli_in(Path::new(env!("CARGO_MANIFEST_DIR")), args)
+}
+
+fn cli_in(directory: &Path, args: &[&str]) -> Output {
     Command::new(BIN)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(directory)
         .args(args)
         .output()
         .expect("CLI を起動できる")
@@ -177,6 +181,130 @@ fn eval_meta_reports_integer_arithmetic_at_the_original_helper() {
             "path": "helper.ncg2m",
             "range": {"start": start, "end": start + incomplete.len()},
         })
+    );
+}
+
+#[test]
+fn eval_meta_steps_accumulates_across_slices_and_preserves_result_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("steps.ncg2m");
+    let mut source = String::from("(defn level0 (as-type (Fn () Nat) (fn () 1)))\n");
+    for level in 1..=12 {
+        let previous = level - 1;
+        source.push_str(&format!(
+            "(defn level{level} (as-type (Fn () Nat) (fn () (add (level{previous}) (level{previous})))))\n"
+        ));
+    }
+    fs::write(&file, source).unwrap();
+    let file = "steps.ncg2m";
+    let cli = |args: &[&str]| cli_in(dir.path(), args);
+
+    let limited = cli(&[
+        "eval-meta",
+        "--defn",
+        "::level12",
+        "--steps",
+        "--fuel",
+        "4097",
+        file,
+    ]);
+    assert_eq!(limited.status.code(), Some(2), "{limited:?}");
+    assert!(limited.stdout.is_empty());
+    let diagnostic = String::from_utf8(limited.stderr).unwrap();
+    assert!(diagnostic.contains("評価が完了しなかった"));
+    assert_eq!(diagnostic.lines().last(), Some("steps=4097"));
+
+    let complete = cli(&["eval-meta", "--defn", "::level12", "--steps", file]);
+    assert!(complete.status.success(), "{complete:?}");
+    assert_eq!(complete.stdout, b"4096\n");
+    let stderr = String::from_utf8(complete.stderr).unwrap();
+    let exact = stderr.trim_end().strip_prefix("steps=").unwrap();
+    assert!(exact.parse::<u64>().unwrap() > 4097);
+    let just_enough = cli(&[
+        "eval-meta",
+        "--defn",
+        "::level12",
+        "--steps",
+        "--fuel",
+        exact,
+        file,
+    ]);
+    assert!(just_enough.status.success(), "{just_enough:?}");
+    assert_eq!(just_enough.stdout, complete.stdout);
+    assert_eq!(just_enough.stderr, stderr.as_bytes());
+}
+
+#[test]
+fn eval_meta_steps_reports_evaluation_errors_and_skips_failed_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("steps.ncg2m");
+    fs::write(
+        &file,
+        "(defn fail (as-type (Fn (Nat) Nat) (fn (x) (sub x 1))))",
+    )
+    .unwrap();
+    let path = "steps.ncg2m";
+    let cli = |args: &[&str]| cli_in(dir.path(), args);
+    let evaluate = |arg| {
+        cli(&[
+            "eval-meta",
+            "--defn",
+            "::fail",
+            "--arg",
+            arg,
+            "--steps",
+            path,
+        ])
+    };
+
+    let failed = evaluate("Nat:0");
+    assert_eq!(failed.status.code(), Some(1), "{failed:?}");
+    assert!(failed.stdout.is_empty());
+    let diagnostic = String::from_utf8(failed.stderr).unwrap();
+    let (steps, message) = diagnostic.split_once('\n').unwrap();
+    let completed = steps
+        .strip_prefix("steps=")
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!(completed > 1);
+    assert!(message.contains("`sub` の計算結果は Nat の範囲外"));
+
+    let prior = (completed - 1).to_string();
+    let limited = cli(&[
+        "eval-meta",
+        "--defn",
+        "::fail",
+        "--arg",
+        "Nat:0",
+        "--steps",
+        "--fuel",
+        &prior,
+        path,
+    ]);
+    assert_eq!(limited.status.code(), Some(2), "{limited:?}");
+    assert!(limited.stdout.is_empty());
+    let diagnostic = String::from_utf8(limited.stderr).unwrap();
+    assert_eq!(
+        diagnostic.lines().last(),
+        Some(format!("steps={prior}").as_str())
+    );
+
+    let invalid = evaluate("Int:0");
+    assert_eq!(invalid.status.code(), Some(1), "{invalid:?}");
+    assert!(invalid.stdout.is_empty());
+    let diagnostic = String::from_utf8(invalid.stderr).unwrap();
+    assert!(diagnostic.contains("引数は Nat"));
+    assert!(!diagnostic.contains("steps="));
+
+    fs::write(&file, "(").unwrap();
+    let invalid = evaluate("Nat:0");
+    assert_eq!(invalid.status.code(), Some(1), "{invalid:?}");
+    assert!(invalid.stdout.is_empty());
+    assert!(
+        !String::from_utf8(invalid.stderr)
+            .unwrap()
+            .contains("steps=")
     );
 }
 
