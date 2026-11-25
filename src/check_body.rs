@@ -215,15 +215,7 @@ fn function_error(
             expected,
             actual,
             ..
-        })) => {
-            if let Some(report) = report {
-                report.body_error("argument_count", &call, []);
-            }
-            format!(
-                "{} 引数は {expected} 個必要だが、{actual} 個ある。",
-                diagnostic::located(&call)
-            )
-        }
+        })) => argument_count(&call, expected, actual, None, report),
         FuncSignalTypeError::Literal(FuncLiteralError::Arity(FuncArityError::OutputCount {
             expression,
             left,
@@ -263,4 +255,28 @@ fn function_error(
             )
         }
     }
+}
+
+/// 元の呼び出し範囲と、分かる場合は参照先の宣言を引数個数の診断に使う。
+pub(super) fn argument_count(
+    call: &LocatedName<'_, '_>,
+    expected: usize,
+    actual: usize,
+    declaration: Option<&LocatedName<'_, '_>>,
+    report: &mut Option<&mut Report<'_>>,
+) -> String {
+    if let Some(report) = report {
+        report.body_error("argument_count", call, declaration);
+    }
+    let mut message = format!(
+        "{} 引数は {expected} 個必要だが、{actual} 個ある。",
+        diagnostic::located(call)
+    );
+    if let Some(declaration) = declaration {
+        message.push_str(&format!(
+            "\n  呼び出し先の宣言 {}",
+            diagnostic::located(declaration)
+        ));
+    }
+    message
 }
