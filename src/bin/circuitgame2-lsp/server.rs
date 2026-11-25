@@ -10,6 +10,7 @@ use std::{
 
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding, TextPosition, prepare_source_edit},
+    ncg2m::file::{MetaItem, index_meta_file},
     project::SourceKind,
     syntax::circuit::CachedCircuitRecovery,
 };
@@ -55,7 +56,10 @@ enum DocumentAnalysis {
         text: String,
         recovery: LocalRecovery,
     },
-    Functional(String),
+    Functional {
+        text: String,
+        items: Option<Vec<MetaItem>>,
+    },
 }
 
 impl DocumentAnalysis {
@@ -72,8 +76,14 @@ impl DocumentAnalysis {
                 (Self::Full(analysis), diagnostics)
             }
             SourceKind::Functional => {
-                let diagnostics = diagnostic::collect_meta(uri, &text, encoding);
-                (Self::Functional(text), diagnostics)
+                let (items, diagnostics) = match index_meta_file(&text) {
+                    Ok(items) => (Some(items), Vec::new()),
+                    Err(error) => (
+                        None,
+                        diagnostic::render_meta_error(uri, &text, encoding, error),
+                    ),
+                };
+                (Self::Functional { text, items }, diagnostics)
             }
         }
     }
@@ -81,14 +91,14 @@ impl DocumentAnalysis {
     fn text(&self) -> &str {
         match self {
             Self::Full(analysis) => analysis.text(),
-            Self::Local { text, .. } | Self::Functional(text) => text,
+            Self::Local { text, .. } | Self::Functional { text, .. } => text,
         }
     }
 
     fn full(&self) -> Option<&CachedCircuitRecovery> {
         match self {
             Self::Full(analysis) => Some(analysis),
-            Self::Local { .. } | Self::Functional(_) => None,
+            Self::Local { .. } | Self::Functional { .. } => None,
         }
     }
 }
@@ -437,14 +447,30 @@ impl Server {
             }
         };
         let uri = &params.text_document.uri;
-        let (Some(document), Some(encoding)) = (self.circuit_document(uri), self.encoding) else {
+        let (Some(document), Some(encoding)) = (self.documents.get(uri), self.encoding) else {
             return Response::new_ok(request.id, ());
         };
-        let result = symbols::collect(
-            document.open_snapshot(uri),
-            encoding,
-            self.hierarchical_symbols,
-        );
+        let result = match (document.kind, &document.analysis) {
+            (SourceKind::Circuit, _) => symbols::collect(
+                document.open_snapshot(uri),
+                encoding,
+                self.hierarchical_symbols,
+            ),
+            (
+                SourceKind::Functional,
+                Some(DocumentAnalysis::Functional {
+                    text,
+                    items: Some(items),
+                }),
+            ) => Some(symbols::collect_functional(
+                uri,
+                text,
+                items,
+                encoding,
+                self.hierarchical_symbols,
+            )),
+            (SourceKind::Functional, _) => None,
+        };
         Response::new_ok(request.id, result)
     }
 
@@ -745,7 +771,7 @@ impl Document {
             Some(DocumentAnalysis::Full(old)) => single_edit.and_then(|range| {
                 LocalRecovery::remember(&old, sources::core_revision(previous_version), range)
             }),
-            Some(DocumentAnalysis::Functional(_)) | None => None,
+            Some(DocumentAnalysis::Functional { .. }) | None => None,
         };
         if let Some(recovery) = local
             && let Some(syntax) =

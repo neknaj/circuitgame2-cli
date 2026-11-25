@@ -120,7 +120,9 @@ fn stdio_checks_ncg2m_after_sequential_edits_and_a_full_replacement() {
     assert_eq!(reports(4).len(), 1);
     assert_eq!(reports(4)[0]["code"], "UnexpectedClose");
     let symbols = responses.iter().find(|message| message["id"] == 2).unwrap();
-    assert!(symbols["result"].is_null(), "{symbols:?}");
+    assert_eq!(symbols["result"].as_array().unwrap().len(), 2);
+    assert_eq!(symbols["result"][0]["name"], "quoted");
+    assert_eq!(symbols["result"][1]["name"], "choose");
 }
 
 #[test]
@@ -244,6 +246,85 @@ fn stdio_uses_utf16_positions_from_the_latest_document() {
     );
     assert_eq!(responses[5]["id"], 3);
     assert!(responses[5].get("error").is_none(), "{:?}", responses[5]);
+}
+
+#[test]
+fn ncg2m_outline_uses_current_document_and_real_namespace_blocks() {
+    let uri = "untitled:outline.ncg2m";
+    let source = "(namespace tools (defmacro make () (quote \"🐈\")) (defn ready (as-type (Fn () Bool) (fn () true))) (export ready))\n\
+                  (namespace tools (defmacro other () (quote value)))";
+    let ready_column = source[..source.find(" ready").unwrap() + 1]
+        .encode_utf16()
+        .count();
+    let ready_span = json!({"start": {"line": 0, "character": ready_column},
+                             "end": {"line": 0, "character": ready_column + 5}});
+    let document = json!({"textDocument": {"uri": uri}});
+    for hierarchical in [false, true] {
+        let responses = exchange([
+            request(
+                1,
+                "initialize",
+                json!({"capabilities": {"textDocument": {
+                    "documentSymbol": {"hierarchicalDocumentSymbolSupport": hierarchical}
+                }}}),
+            ),
+            notification("initialized", json!({})),
+            notification(
+                "textDocument/didOpen",
+                json!({"textDocument": {
+                    "uri": uri, "languageId": "ncg2m", "version": 1, "text": source
+                }}),
+            ),
+            request(2, "textDocument/documentSymbol", document.clone()),
+            notification(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": {"uri": uri, "version": 2},
+                    "contentChanges": [{"text": ")"}]
+                }),
+            ),
+            request(3, "textDocument/documentSymbol", document.clone()),
+            notification(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": {"uri": uri, "version": 3},
+                    "contentChanges": [{"text": "(defmacro fresh () (quote value))"}]
+                }),
+            ),
+            request(4, "textDocument/documentSymbol", document.clone()),
+            request(5, "shutdown", Value::Null),
+            notification("exit", Value::Null),
+        ]);
+        let result = |id| {
+            &responses
+                .iter()
+                .find(|response| response["id"] == id)
+                .unwrap()["result"]
+        };
+        let symbols = result(2).as_array().unwrap();
+        if hierarchical {
+            assert_eq!(symbols.len(), 2);
+            assert_eq!(symbols[0]["name"], "tools");
+            assert_eq!(symbols[0]["children"].as_array().unwrap().len(), 2);
+            assert_eq!(symbols[0]["children"][0]["name"], "make");
+            assert_eq!(symbols[0]["children"][1]["name"], "ready");
+            assert_eq!(symbols[0]["children"][1]["selectionRange"], ready_span);
+            assert_eq!(symbols[1]["name"], "tools");
+            assert_eq!(symbols[1]["children"].as_array().unwrap().len(), 1);
+            assert_eq!(symbols[1]["children"][0]["name"], "other");
+        } else {
+            let names: Vec<_> = symbols
+                .iter()
+                .map(|symbol| symbol["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, ["tools", "make", "ready", "tools", "other"]);
+            assert_eq!(symbols[2]["location"]["range"], ready_span);
+            assert_eq!(symbols[2]["containerName"], "tools");
+        }
+        assert!(result(3).is_null());
+        assert_eq!(result(4).as_array().unwrap().len(), 1);
+        assert_eq!(result(4)[0]["name"], "fresh");
+    }
 }
 
 #[test]
