@@ -482,6 +482,20 @@ fn namespace_selection_and_diagnostics_preserve_file_boundaries() {
         serde_json::json!({"start": start, "end": start + 4})
     );
     assert_eq!(error["related"].as_array().unwrap().len(), 2);
+
+    let expansion = "(using nor) (func pending (in) (out y) (expand make))";
+    fs::write(folder.0.join("pending.ncg2"), expansion).unwrap();
+    let machine = run(&["check", "--format", "json", "pending.ncg2"]);
+    assert_eq!(machine.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    let error = &report["diagnostics"][0];
+    let call = "(expand make)";
+    let start = expansion.find(call).unwrap();
+    assert_eq!(error["code"], "needs_expansion");
+    assert_eq!(
+        error["location"]["range"],
+        serde_json::json!({"start": start, "end": start + call.len()})
+    );
 }
 
 #[test]

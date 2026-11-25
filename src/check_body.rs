@@ -4,8 +4,9 @@ use circuitgame2_cli::CLOCKED_LIMITS;
 use circuitgame2_core::{
     project::{
         CircuitProject, FuncArityError, FuncAtomTypeError, FuncDriverError, FuncLiteralError,
-        FuncSignalReason, FuncSignalTypeError, FuncWiringError, LocatedName, ModuleBodyPosition,
-        ModuleCallInputsError, ModuleCallsError, ModuleOutputTypesError, UseAliases,
+        FuncSignalReason, FuncSignalTypeError, FuncWiringError, FuncWiringResult, LocatedName,
+        ModuleBodyPosition, ModuleCallInputsError, ModuleCallsError, ModuleOutputTypesError,
+        UseAliases,
     },
     syntax::circuit::Head,
 };
@@ -37,11 +38,24 @@ pub(super) fn check<'p, 'a>(
             };
             let width = CLOCKED_LIMITS.width;
             if item.head == Head::Func {
-                aliases
+                let result = aliases
                     .check_func_signal_types(file, entry, width)
                     .map_err(|error| function_error(&site, error, report))?;
+                match result.literals.wiring {
+                    FuncWiringResult::Checked(_) => {}
+                    FuncWiringResult::NeedsExpansion(expand) => {
+                        if let Some(report) = report {
+                            report.body_error("needs_expansion", &expand, []);
+                        }
+                        return Err(format!(
+                            "{} マクロ展開が必要なため本体を検査できない。",
+                            diagnostic::located(&expand),
+                        ));
+                    }
+                    FuncWiringResult::NotFunc => return Err(body_unavailable(&site, report)),
+                }
             } else {
-                aliases
+                let checked = aliases
                     .check_module_calls(ModuleBodyPosition { file, entry }, width)
                     .map_err(|error| {
                         if let Some(report) = report {
@@ -71,12 +85,24 @@ pub(super) fn check<'p, 'a>(
                         }
                         diagnostic::clocked::calls(&diagnostic::located(&site), error)
                     })?;
+                if checked.is_none() {
+                    return Err(body_unavailable(&site, report));
+                }
             }
         }
     }
     Ok(())
 }
 
+fn body_unavailable(site: &LocatedName<'_, '_>, report: &mut Option<&mut Report<'_>>) -> String {
+    if let Some(report) = report {
+        report.body_error("body_unavailable", site, []);
+    }
+    format!(
+        "{} 宣言位置に検査対象の本体が見つからない。",
+        diagnostic::located(site)
+    )
+}
 fn function_error(
     function: &LocatedName<'_, '_>,
     error: FuncSignalTypeError<'_, '_>,
