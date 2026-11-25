@@ -1,0 +1,10 @@
+(using nor)
+(namespace demo
+  (func one (in x) (out y)
+    (def y (nor x x)))
+  (func twice (in x) (out y)
+    (def middle (one x))
+    (def y (one middle)))
+  (func direct (in x) (out x))
+  (module oscillator (in) (out q)
+    (def q (nor q q))))

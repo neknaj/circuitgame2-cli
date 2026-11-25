@@ -138,7 +138,7 @@ impl Server {
             (State::Ready, "textDocument/documentSymbol") => self.document_symbols(request),
             (State::Ready, "textDocument/hover") => self.hover(request),
             (State::Ready, "textDocument/semanticTokens/full") => self.semantic_tokens(request),
-            (State::Ready, "textDocument/inlayHint") => self.settling_hints(request),
+            (State::Ready, "textDocument/inlayHint") => self.circuit_hints(request),
             (State::Ready, method) if method != "initialize" => Response::new_err(
                 request.id,
                 ErrorCode::MethodNotFound as i32,
@@ -228,7 +228,7 @@ impl Server {
         )
     }
 
-    fn settling_hints(&mut self, request: Request) -> Response {
+    fn circuit_hints(&mut self, request: Request) -> Response {
         let params: InlayHintParams = match serde_json::from_value(request.params) {
             Ok(params) => params,
             Err(error) => {

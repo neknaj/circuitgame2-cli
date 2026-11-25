@@ -1,4 +1,4 @@
-//! 定常化の推論結果を、要求範囲にあるモジュール名の横へ表示する。
+//! 展開した回路の NOR ゲート数と定常化上界を、宣言名の横に表示する。
 
 use std::ops::Range;
 
@@ -6,6 +6,7 @@ use circuitgame2_cli::CLOCKED_LIMITS;
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding, TextPosition},
     project::{check_use_aliases, index_use_targets, normalize_path, validate_circuit_basis},
+    syntax::circuit::{Head, named_build_entry},
 };
 use lsp_types::{InlayHint, InlayHintLabel, InlayHintTooltip, Uri};
 
@@ -22,7 +23,7 @@ pub(super) struct HintSnapshot {
     pub(super) dependencies: Vec<Uri>,
 }
 
-/// 解析対象の本文で上界を求められたモジュールにヒントを返す。
+/// 要求範囲内で展開できた関数とモジュールのヒントを返す。
 pub(super) fn collect<'a>(
     current: OpenDocument<'a>,
     start: TextPosition,
@@ -78,29 +79,55 @@ fn analyze(
         return Vec::new();
     };
     let mut hints = Vec::new();
-    for (name, form) in project.circuits()[file].names.iter().enumerate() {
+    let circuit = &project.circuits()[file];
+    for (name, form) in circuit.names.iter().enumerate() {
         let offset = form.name.span.end;
         if !range.contains(&offset) {
             continue;
         }
-        let Ok(Some(hint)) = aliases.module_settling_hint(file, name, CLOCKED_LIMITS) else {
-            continue;
+        let (nor_gates, settling_ticks) = match form.head {
+            Head::Func => {
+                let entry = named_build_entry(text, circuit, name);
+                let Ok(Some(function)) = aliases.expand_reachable_function(
+                    (file, entry),
+                    CLOCKED_LIMITS.width,
+                    CLOCKED_LIMITS.wiring_bits,
+                    CLOCKED_LIMITS.gates,
+                ) else {
+                    continue;
+                };
+                (function.netlist().gates.len(), None)
+            }
+            Head::Module => {
+                let Ok(Some(hint)) = aliases.module_expansion_hint(file, name, CLOCKED_LIMITS)
+                else {
+                    continue;
+                };
+                (hint.nor_gates, hint.settling_ticks)
+            }
+            _ => continue,
         };
-        let offset = hint.location.span.end;
         let Some(position) = wire_range(lines, text.as_bytes(), &(offset..offset), encoding)
             .map(|range| range.start)
         else {
             continue;
         };
+        let count_help = "階層を展開した回路の NOR ゲート数。配線と状態素子は含まない。";
+        let (label, tooltip) = match settling_ticks {
+            Some(ticks) => (
+                format!("NOR {nor_gates} · 定常化 ≤ {ticks} tick"),
+                format!(
+                    "{count_help}\n定常化上界は、固定入力の下で任意の有効な初期状態から内部ゲート値が揃うまでの tick 数。"
+                ),
+            ),
+            None => (format!("NOR {nor_gates}"), count_help.into()),
+        };
         hints.push(InlayHint {
             position,
-            label: InlayHintLabel::String(format!("定常化 ≤ {} tick", hint.ticks)),
+            label: InlayHintLabel::String(label),
             kind: None,
             text_edits: None,
-            tooltip: Some(InlayHintTooltip::String(
-                "固定入力の下で、任意の有効な初期状態からの内部ゲート値を対象とする。上界は展開後の回路で最も深いゲートの深さ。"
-                    .into(),
-            )),
+            tooltip: Some(InlayHintTooltip::String(tooltip)),
             padding_left: Some(true),
             padding_right: None,
             data: None,
