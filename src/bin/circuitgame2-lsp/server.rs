@@ -4,6 +4,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap},
     io::{self, BufRead, Write},
+    ops::Range,
     process::ExitCode,
 };
 
@@ -21,7 +22,9 @@ use lsp_types::{
 };
 
 use super::{
-    completion, definition, diagnostic, inlay_hint,
+    completion, definition,
+    diagnostic::{self, LocalRecovery},
+    inlay_hint,
     sources::{self, OpenDocument, ProjectKey, STANDALONE_ID, SourcePaths, SourceSet},
 };
 
@@ -36,9 +39,33 @@ enum State {
 
 struct Document {
     version: i32,
-    analysis: Option<CachedCircuitRecovery>,
+    analysis: Option<DocumentAnalysis>,
     syntax: Vec<lsp_types::Diagnostic>,
     published: Option<(i32, Vec<lsp_types::Diagnostic>)>,
+}
+
+enum DocumentAnalysis {
+    Full(CachedCircuitRecovery),
+    Local {
+        text: String,
+        recovery: LocalRecovery,
+    },
+}
+
+impl DocumentAnalysis {
+    fn text(&self) -> &str {
+        match self {
+            Self::Full(analysis) => analysis.text(),
+            Self::Local { text, .. } => text,
+        }
+    }
+
+    fn full(&self) -> Option<&CachedCircuitRecovery> {
+        match self {
+            Self::Full(analysis) => Some(analysis),
+            Self::Local { .. } => None,
+        }
+    }
 }
 
 struct DocumentUpdate {
@@ -324,7 +351,7 @@ impl Server {
                 let mut document = Document {
                     version: item.version,
                     syntax: diagnostic::collect(&item.uri, &analysis, encoding),
-                    analysis: Some(analysis),
+                    analysis: Some(DocumentAnalysis::Full(analysis)),
                     published: None,
                 };
                 let syntax = document.publish_syntax(&item.uri);
@@ -347,12 +374,7 @@ impl Server {
                 let changes = parameters
                     .get_mut("contentChanges")
                     .and_then(|changes| decode(changes.take()));
-                document.change(item.version, changes, encoding);
-                document.syntax = document
-                    .analysis
-                    .as_ref()
-                    .map(|analysis| diagnostic::collect(&item.uri, analysis, encoding))
-                    .unwrap_or_default();
+                document.change(&item.uri, item.version, changes, encoding);
                 Some(DocumentUpdate {
                     uri: item.uri.clone(),
                     encoding,
@@ -489,52 +511,82 @@ impl Document {
     fn open_snapshot<'a>(&'a self, uri: &'a Uri) -> OpenDocument<'a> {
         OpenDocument {
             uri,
-            text: self.analysis.as_ref().map(CachedCircuitRecovery::text),
-            analysis: self.analysis.as_ref(),
+            text: self.analysis.as_ref().map(DocumentAnalysis::text),
+            analysis: self.analysis.as_ref().and_then(DocumentAnalysis::full),
             version: self.version,
         }
     }
 
-    /// 同じ通知の変更を前から適用し、最終結果だけを保持する。
+    /// 同じ通知の変更を順に適用し、最終本文と診断を新しい文書バージョンで保持する。
     /// 範囲を適用できなかった本文は、次の全文置換で再取得する。
     fn change(
         &mut self,
+        uri: &Uri,
         version: i32,
         changes: Option<Vec<TextDocumentContentChangeEvent>>,
         encoding: PositionEncoding,
     ) {
+        let previous_version = self.version;
+        let prior = self.analysis.take();
         let result = changes.ok_or("変更一覧の構造が不正。").and_then(|changes| {
             apply_changes(
-                self.analysis.as_ref().map(CachedCircuitRecovery::text),
+                prior.as_ref().map(DocumentAnalysis::text),
                 changes,
                 encoding,
             )
         });
         self.version = version;
-        match result {
-            Ok(text) => {
-                if self
-                    .analysis
-                    .as_ref()
-                    .is_none_or(|prior| prior.reuse(&text).is_none())
-                {
-                    self.analysis = Some(CachedCircuitRecovery::analyze(text.into_owned()));
-                }
-            }
+        let applied = match result {
+            Ok(applied) => applied,
             Err(reason) => {
-                self.analysis = None;
+                self.syntax.clear();
                 eprintln!("文書版 {version} の変更を適用できない。{reason}");
+                return;
             }
+        };
+        if prior
+            .as_ref()
+            .is_some_and(|old| old.text() == applied.text.as_ref())
+        {
+            self.analysis = prior;
+            return;
+        }
+        let AppliedChanges { text, single_edit } = applied;
+        let text = text.into_owned();
+        let local = match prior {
+            Some(DocumentAnalysis::Local { recovery, .. }) => Some(recovery),
+            Some(DocumentAnalysis::Full(old)) => single_edit.and_then(|range| {
+                LocalRecovery::remember(&old, sources::core_revision(previous_version), range)
+            }),
+            None => None,
+        };
+        if let Some(recovery) = local
+            && let Some(syntax) =
+                recovery.collect(uri, &text, sources::core_revision(version), encoding)
+        {
+            self.syntax = syntax;
+            self.analysis = Some(DocumentAnalysis::Local { text, recovery });
+        } else {
+            let analysis = CachedCircuitRecovery::analyze(text);
+            self.syntax = diagnostic::collect(uri, &analysis, encoding);
+            self.analysis = Some(DocumentAnalysis::Full(analysis));
         }
     }
+}
+
+struct AppliedChanges<'a> {
+    text: Cow<'a, str>,
+    single_edit: Option<Range<usize>>,
 }
 
 fn apply_changes(
     text: Option<&str>,
     changes: Vec<TextDocumentContentChangeEvent>,
     encoding: PositionEncoding,
-) -> Result<Cow<'_, str>, &'static str> {
+) -> Result<AppliedChanges<'_>, &'static str> {
     let mut current = text.map(Cow::Borrowed);
+    let single_change = changes.len() == 1;
+    let mut single_edit = None;
     for change in changes {
         let Some(range) = change.range else {
             current = Some(Cow::Owned(change.text));
@@ -552,9 +604,13 @@ fn apply_changes(
             .ok_or("変更範囲の終点が文字境界または既存の行を指していない。")?;
         let edited = apply_source_edit(source, start..end, &change.text)
             .map_err(|_| "変更範囲の順序、長さ、または文字境界が不正。")?;
+        if single_change {
+            single_edit = Some(start..end);
+        }
         current = Some(Cow::Owned(edited.as_str().to_owned()));
     }
-    current.ok_or("本文を全文置換で受け取る必要がある。")
+    let text = current.ok_or("本文を全文置換で受け取る必要がある。")?;
+    Ok(AppliedChanges { text, single_edit })
 }
 
 fn text_position(position: lsp_types::Position) -> Result<TextPosition, &'static str> {
@@ -588,4 +644,135 @@ fn diagnostics_notification(
         PublishDiagnosticsParams::new(uri, diagnostics, version),
     )
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn replacement(source: &str, old: &str, new: &str) -> TextDocumentContentChangeEvent {
+        let start = source.find(old).unwrap();
+        let column = |byte| source[..byte].encode_utf16().count() as u32;
+        TextDocumentContentChangeEvent {
+            range: Some(lsp_types::Range::new(
+                lsp_types::Position::new(0, column(start)),
+                lsp_types::Position::new(0, column(start + old.len())),
+            )),
+            range_length: None,
+            text: new.to_owned(),
+        }
+    }
+
+    #[test]
+    fn local_syntax_diagnostics_match_full_recovery_across_document_revisions() {
+        let uri: Uri = "untitled:incremental.ncg2".parse().unwrap();
+        let encoding = PositionEncoding::Utf16;
+        let original =
+            r#"(using nor)(first "🐈") (test demo (reset) (case)) (using) (x "bad\q") (unfinished"#;
+        let analysis = CachedCircuitRecovery::analyze(original.to_owned());
+        let mut document = Document {
+            version: -4,
+            syntax: diagnostic::collect(&uri, &analysis, encoding),
+            analysis: Some(DocumentAnalysis::Full(analysis)),
+            published: None,
+        };
+        let input = replacement(original, "🐈", "🦊漢");
+        let after_first = original.replace("🐈", "🦊漢");
+        document.change(&uri, -3, Some(vec![input]), encoding);
+        assert!(matches!(
+            &document.analysis,
+            Some(DocumentAnalysis::Local { .. })
+        ));
+        assert_eq!(
+            document.open_snapshot(&uri).text,
+            Some(after_first.as_str())
+        );
+        let expect = |text: &str| {
+            diagnostic::collect(
+                &uri,
+                &CachedCircuitRecovery::analyze(text.to_owned()),
+                encoding,
+            )
+        };
+        assert_eq!(document.syntax, expect(&after_first));
+
+        let first = replacement(&after_first, "first", "f");
+        let intermediate = after_first.replace("first", "f");
+        let second = replacement(&intermediate, "漢", "あいう");
+        let after_both = intermediate.replace("漢", "あいう");
+        document.change(&uri, -2, Some(vec![first, second]), encoding);
+        assert!(matches!(
+            &document.analysis,
+            Some(DocumentAnalysis::Local { .. })
+        ));
+        assert_eq!(document.open_snapshot(&uri).text, Some(after_both.as_str()));
+        assert_eq!(document.syntax, expect(&after_both));
+
+        let mut server = Server {
+            state: State::Ready,
+            encoding: Some(encoding),
+            ..Server::default()
+        };
+        server.documents.insert(uri.clone(), document);
+        let stale = Notification::new(
+            "textDocument/didChange".to_owned(),
+            serde_json::json!({
+                "textDocument": {"uri": uri, "version": -3},
+                "contentChanges": [{"text": ")"}],
+            }),
+        );
+        assert!(server.notification(stale).is_none());
+        let document = server.documents.get_mut(&uri).unwrap();
+        assert_eq!(document.version, -2);
+        assert_eq!(document.open_snapshot(&uri).text, Some(after_both.as_str()));
+
+        document.change(
+            &uri,
+            -1,
+            Some(vec![replacement(&after_both, "nor", "nand")]),
+            encoding,
+        );
+        assert!(matches!(
+            &document.analysis,
+            Some(DocumentAnalysis::Full(_))
+        ));
+        let fallback_text = after_both.replace("nor", "nand");
+        assert_eq!(
+            document.open_snapshot(&uri).text,
+            Some(fallback_text.as_str())
+        );
+        assert_eq!(document.syntax, expect(&fallback_text));
+        let Some(Message::Notification(published)) = document.publish_syntax(&uri) else {
+            panic!("expected syntax diagnostics");
+        };
+        assert_eq!(published.params["version"], -1);
+        assert_eq!(published.params["uri"], uri.as_str());
+
+        let extra_close = "(using nor))(func gate (in x y) (out z) (def z (nor x y)))";
+        document.change(
+            &uri,
+            0,
+            Some(vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: extra_close.to_owned(),
+            }]),
+            encoding,
+        );
+        assert!(!document.syntax.is_empty());
+        let change = replacement(extra_close, "))(", ")(");
+        let complete = extra_close.replace("))(", ")(");
+        document.change(&uri, 1, Some(vec![change]), encoding);
+        assert!(matches!(
+            &document.analysis,
+            Some(DocumentAnalysis::Full(_))
+        ));
+        assert_eq!(document.open_snapshot(&uri).text, Some(complete.as_str()));
+        assert!(document.syntax.is_empty());
+        let Some(Message::Notification(cleared)) = document.publish_syntax(&uri) else {
+            panic!("expected cleared diagnostics");
+        };
+        assert_eq!(cleared.params["version"], 1);
+        assert_eq!(cleared.params["diagnostics"], serde_json::json!([]));
+    }
 }
