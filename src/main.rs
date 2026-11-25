@@ -511,7 +511,7 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<ExitCode, String> {
                 |error| {
                     config::at(
                         path,
-                        settings.entry.as_ref().map(toml::Spanned::span),
+                        settings.entry.as_ref().map(|entry| entry.span()),
                         &error,
                     )
                 },
@@ -542,7 +542,7 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<ExitCode, String> {
         .map_err(|error| match (&command, &settings) {
             (Command::Run { .. } | Command::Settle { .. }, Some((path, settings))) => config::at(
                 path,
-                settings.entry.as_ref().map(toml::Spanned::span),
+                settings.entry.as_ref().map(|entry| entry.span()),
                 &error,
             ),
             _ => error,
