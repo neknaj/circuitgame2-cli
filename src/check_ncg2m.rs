@@ -34,8 +34,7 @@ pub(super) fn check(
         .plan_defn_calls()
         .map_err(|error| contextualize(errors::calls(&project, error, report)))?;
 
-    let first_expansion =
-        check_circuit_functions(&project, &aliases, report).map_err(&contextualize)?;
+    let pending = check_circuit_functions(&project, &aliases, report).map_err(&contextualize)?;
 
     // 回路の型検査や展開、マクロ本体の検査が未完了なら、プロジェクト全体の成功は報告しない。
     for (source, index) in project.sources().iter().zip(project.indexes()) {
@@ -55,12 +54,22 @@ pub(super) fn check(
                 }
             }
             ProjectSourceIndex::Circuit(circuit) => {
-                if let Some(expansion) = first_expansion {
+                // 展開が必要なフォームを型が未確定の実引数より先に報告する。
+                if let Some(expansion) = pending.expansion {
                     return Err(contextualize(failure(
                         report,
                         "unsupported_mixed_circuit_check",
                         expansion,
                         "回路関数のマクロ展開に未対応。",
+                        [],
+                    )));
+                }
+                if let Some(argument) = pending.argument {
+                    return Err(contextualize(failure(
+                        report,
+                        "unsupported_mixed_circuit_check",
+                        argument,
+                        "この実引数の型は、混在プロジェクトの検査では確定できない。",
                         [],
                     )));
                 }
@@ -73,7 +82,7 @@ pub(super) fn check(
                     report,
                     "unsupported_mixed_circuit_check",
                     site(source, span),
-                    "NCG2M を含むプロジェクトでは、回路本体の型検査と展開が未対応。",
+                    "混在プロジェクトでは、回路本体の検査と展開に未対応の処理がある。",
                     [],
                 )));
             }
@@ -144,13 +153,19 @@ fn resolve_aliases<'t, 'p, 'a>(
     Ok(aliases)
 }
 
-/// 関数をソース順に調べ、結線と入出力個数の最初の違反を返す。
+#[derive(Default)]
+struct PendingCircuitChecks<'p, 'a> {
+    expansion: Option<LocatedName<'p, 'a>>,
+    argument: Option<LocatedName<'p, 'a>>,
+}
+
+/// 関数をソース順に調べ、結線と入出力の個数、型に関する最初の違反を返す。
 fn check_circuit_functions<'p, 'a>(
     project: &'p ParsedProjectSources<'a>,
     aliases: &MixedUseAliases<'_, 'p, 'a>,
     report: &mut Option<&mut Report<'_>>,
-) -> Result<Option<LocatedName<'p, 'a>>, String> {
-    let mut first_expansion = None;
+) -> Result<PendingCircuitChecks<'p, 'a>, String> {
+    let mut pending = PendingCircuitChecks::default();
     for (file, index) in project.indexes().iter().enumerate() {
         let ProjectSourceIndex::Circuit(circuit) = index else {
             continue;
@@ -160,23 +175,30 @@ fn check_circuit_functions<'p, 'a>(
                 continue;
             }
             let checked = aliases
-                .check_mixed_func_arity(file, entry, WIDTH_LIMIT)
+                .check_mixed_func_input_types(file, entry, WIDTH_LIMIT)
                 .map_err(|error| {
                     let span = circuit
                         .names
                         .iter()
                         .find(|name| name.form == item.form)
                         .map_or(0..0, |name| name.name.span.clone());
-                    errors::mixed_function(&site(&project.sources()[file], span), error, report)
+                    errors::mixed_function_types(
+                        &site(&project.sources()[file], span),
+                        error,
+                        report,
+                    )
                 })?;
-            if let FuncWiringResult::NeedsExpansion(expansion) = checked
-                && first_expansion.is_none()
+            if let FuncWiringResult::NeedsExpansion(expansion) = checked.outputs.literals.wiring
+                && pending.expansion.is_none()
             {
-                first_expansion = Some(expansion);
+                pending.expansion = Some(expansion);
+            }
+            if pending.argument.is_none() {
+                pending.argument = checked.deferred_argument;
             }
         }
     }
-    Ok(first_expansion)
+    Ok(pending)
 }
 
 fn alias_name<'p, 'a>(directive: &UseSite<'p, 'a>) -> LocatedName<'p, 'a> {
