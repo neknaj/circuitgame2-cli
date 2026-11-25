@@ -6,7 +6,7 @@ use circuitgame2_core::{
     editor::PositionEncoding,
     syntax::{
         OwnedRecoveryCache, SnapshotRecovery,
-        circuit::{CachedCircuitRecovery, CircuitRecovery},
+        circuit::{CachedCircuitRecovery, CircuitRecovery, relocate_circuit_span},
     },
 };
 use lsp_types::{Diagnostic, Uri};
@@ -103,18 +103,12 @@ impl LocalRecovery {
 
 impl Report {
     fn relocated(mut self, old_base: usize, new_base: usize) -> Option<Self> {
-        self.span = relocate(&self.span, old_base, new_base)?;
+        self.span = relocate_circuit_span(&self.span, old_base, new_base)?;
         if let Some((span, _)) = &mut self.related {
-            *span = relocate(span, old_base, new_base)?;
+            *span = relocate_circuit_span(span, old_base, new_base)?;
         }
         Some(self)
     }
-}
-
-fn relocate(span: &Range<usize>, old_base: usize, new_base: usize) -> Option<Range<usize>> {
-    let start = span.start.checked_sub(old_base)?.checked_add(new_base)?;
-    let end = span.end.checked_sub(old_base)?.checked_add(new_base)?;
-    Some(start..end)
 }
 
 #[cfg(test)]
