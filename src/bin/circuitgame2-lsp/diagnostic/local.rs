@@ -116,3 +116,39 @@ fn relocate(span: &Range<usize>, old_base: usize, new_base: usize) -> Option<Ran
     let end = span.end.checked_sub(old_base)?.checked_add(new_base)?;
     Some(start..end)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reused_diagnostics_match_full_recovery_for_each_utf16_revision() {
+        let uri: Uri = "untitled:diagnostic-recovery.ncg2".parse().unwrap();
+        let prefix = "(using nor) (using) ";
+        let middle = "(using nor)";
+        let suffix = " ) (test demo (reset) (case))\r\n(using)\r\n(unfinished";
+        let old = CachedCircuitRecovery::analyze_with_build_index(format!("{prefix}{middle}{suffix}"));
+        let local = LocalRecovery::remember(&old, 1, prefix.len()..prefix.len() + middle.len())
+            .expect("変更箇所の前後に再利用できるリストがある");
+        let revised = [
+            "(using \"漢😀\")",
+            "  ; 前置き😀\r\n(using nor)",
+            "(using) (using nor)",
+        ];
+
+        for (index, middle) in revised.into_iter().enumerate() {
+            let source = format!("{prefix}{middle}{suffix}");
+            let from_local = local
+                .collect(&uri, &source, index as u64 + 2, PositionEncoding::Utf16)
+                .expect("局所再解析を適用できる");
+            let full = CachedCircuitRecovery::analyze_with_build_index(source);
+            let from_full = super::super::collect(&uri, &full, PositionEncoding::Utf16);
+            assert_eq!(from_local, from_full, "文書版 {}", index + 2);
+            assert!(
+                from_local
+                    .iter()
+                    .any(|diagnostic| diagnostic.related_information.is_some())
+            );
+        }
+    }
+}
