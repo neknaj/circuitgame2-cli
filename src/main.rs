@@ -1,6 +1,7 @@
 //! UTF-8 の NCG2 ファイルを読み込み、回路を検査・評価・実行する。
 
 mod clocked;
+mod device_config;
 mod diagnostic;
 mod settling;
 
@@ -434,7 +435,11 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<ExitCode, String> {
         }
         SourceInput::Project(path) => {
             let path = Path::new(path);
-            let settings = config::read(path)?;
+            let settings = if matches!(command, Command::Check(_)) {
+                config::read_settings(path)?
+            } else {
+                config::read(path)?
+            };
             let base = path.parent().unwrap_or(Path::new(""));
             for value in settings.sources.get_ref() {
                 let result = source_path(value.get_ref(), true)
@@ -462,6 +467,29 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<ExitCode, String> {
         source_diagnostic(diagnostic::analysis_error(error, &source_diagnostic))
     })?;
     diagnostic::alias_warnings(&analysis.aliases, &source_diagnostic);
+
+    if matches!(command, Command::Check(_))
+        && let Some((path, settings)) = &settings
+        && !settings.device.is_empty()
+    {
+        let name = settings
+            .entry
+            .as_ref()
+            .map_or("::main", |name| name.get_ref());
+        let (file, entry) =
+            declaration_position(&project, &analysis.aliases.targets, name, Head::Module).map_err(
+                |error| {
+                    config::at(
+                        path,
+                        settings.entry.as_ref().map(toml::Spanned::span),
+                        &error,
+                    )
+                },
+            )?;
+        let aliases = check_use_aliases(&analysis.aliases.targets)
+            .map_err(|error| source_diagnostic(diagnostic::alias_error(error)))?;
+        device_config::check(path, settings, &aliases, ModuleBodyPosition { file, entry })?;
+    }
 
     let (name, kind) = match &command {
         Command::Eval { name, .. } => (*name, Head::Func),
