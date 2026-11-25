@@ -7,6 +7,7 @@ mod device_config;
 mod diagnostic;
 mod dump;
 mod formatting;
+mod nor_count;
 mod rp_plan;
 mod settling;
 
@@ -35,6 +36,8 @@ const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価して�
   ncg2 check [--format json] --project <設定ファイル>\n\
   ncg2 dump <ファイル>...\n\
   ncg2 dump --project <設定ファイル>\n\
+  ncg2 nor-count [--entry <宣言名>] <ファイル>...\n\
+  ncg2 nor-count [--entry <宣言名>] --project <設定ファイル>\n\
   ncg2 fmt [--check | --write] <ファイル>\n\
   ncg2 eval --func <関数名> --input <ビット列> <ファイル>...\n\
   ncg2 eval --func <関数名> --input <ビット列> --project <設定ファイル>\n\
@@ -56,6 +59,7 @@ run の既定の開始点は ::main。--input 一つにつき 1 tick 進める�
 run は reset 直後を tick 0 とし、各行に tick 番号と出力ビット列を表示する。\n\
 --vram を指定すると、指定順に各 VRAM の記憶部を追加する。\n\
 settle は固定入力での定常化を解析する。ネイティブ版では未推定・未証明の終了コードは 2。\n\
+nor-count は展開後の NOR ゲート数を完全修飾名ごとに表示する。\n\
 fmt は整形結果を標準出力に表示する。--check は整形が必要な場合に終了コード 1 を返す。\n\
 ネイティブ版の fmt --write は構文検査と整形が成功した場合にファイルを置き換える。\n\
 入出力はポートの宣言順に並べ、各ポート内は最下位ビットから記す。";
@@ -72,6 +76,10 @@ enum Command<'a> {
         json: bool,
     },
     Dump(SourceInput<'a>),
+    NorCount {
+        entry: Option<&'a str>,
+        sources: SourceInput<'a>,
+    },
     RpPlan {
         project: &'a str,
         board: &'a str,
@@ -308,6 +316,42 @@ fn settle_command(mut args: &[String]) -> Result<Command<'_>, String> {
     })
 }
 
+fn nor_count_command(mut args: &[String]) -> Result<Command<'_>, String> {
+    let mut entry = None;
+    let mut project = None;
+    let mut end_options = false;
+    while let Some((option, rest)) = args.split_first() {
+        match option.as_str() {
+            "--entry" if entry.is_none() => {
+                let (value, rest) = option_value("--entry", rest)?;
+                entry = Some(value);
+                args = rest;
+            }
+            "--project" if project.is_none() => {
+                let (value, rest) = option_value("--project", rest)?;
+                project = Some(value);
+                args = rest;
+            }
+            "--" => {
+                args = rest;
+                end_options = true;
+                break;
+            }
+            _ if option.starts_with('-') => {
+                return Err(format!("nor-count では {option} をここに指定できない。"));
+            }
+            _ => break,
+        }
+    }
+    let sources = match project {
+        Some(path) if args.is_empty() => SourceInput::Project(path),
+        Some(_) => return Err("--project とソースファイルの列挙は併用できない。".into()),
+        None if end_options && !args.is_empty() => SourceInput::Files(args),
+        None => source_input(args)?,
+    };
+    Ok(Command::NorCount { entry, sources })
+}
+
 fn command(args: &[String]) -> Result<Command<'_>, String> {
     match args {
         [flag] if flag == "--help" || flag == "-h" => Ok(Command::Help),
@@ -329,6 +373,7 @@ fn command(args: &[String]) -> Result<Command<'_>, String> {
             })
         }
         [dump, files @ ..] if dump == "dump" => Ok(Command::Dump(source_input(files)?)),
+        [count, args @ ..] if count == "nor-count" => nor_count_command(args),
         [format, args @ ..] if format == "fmt" => formatting::command(args).map(Command::Format),
         [eval, func_flag, name, input_flag, input, files @ ..]
             if eval == "eval"
@@ -522,6 +567,7 @@ fn execute(
         Command::RpPlan { project, .. } => SourceInput::Project(project),
         Command::Check { sources, .. }
         | Command::Dump(sources)
+        | Command::NorCount { sources, .. }
         | Command::Eval { sources, .. }
         | Command::Run { sources, .. }
         | Command::Settle { sources, .. } => *sources,
@@ -544,7 +590,10 @@ fn execute(
             let path = Path::new(path);
             let settings = if matches!(
                 command,
-                Command::Check { .. } | Command::Dump(_) | Command::RpPlan { .. }
+                Command::Check { .. }
+                    | Command::Dump(_)
+                    | Command::NorCount { .. }
+                    | Command::RpPlan { .. }
             ) {
                 config::read_settings_located(path)
                     .map_err(|error| {
@@ -669,6 +718,11 @@ fn execute(
             stdout,
         )
         .map(|()| ExitCode::SUCCESS);
+    }
+
+    if let Command::NorCount { entry, .. } = command {
+        return nor_count::write(&project, aliases, entry, &source_diagnostic, stdout)
+            .map(|()| ExitCode::SUCCESS);
     }
 
     let (name, kind) = match &command {

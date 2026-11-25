@@ -197,6 +197,17 @@ tx-done-ready = "tx-done-ready"
 
 生成した UART 配線表を使う場合は、ファームウェアのビルドに `uart` feature を追加する。 [RP ファームウェアのビルドと信号の扱い](https://github.com/neknaj/circuitgame2-core/tree/main/firmware/rp)
 
+## NOR ゲート数を調べる
+
+`nor-count` はソース内の `func` と `module` を展開し、完全修飾名と NOR ゲート数をタブで区切って1行ずつ出力する。`--entry` で宣言を一つに絞れる。
+
+```sh
+ncg2 nor-count --project examples/project/circuitgame2.toml
+ncg2 nor-count --entry ::demo::invert --project examples/project/circuitgame2.toml
+```
+
+呼び出し先の NOR ゲートも展開した出現箇所ごとに数える。直結、定数、ラッチ、RAM は個数に含めない。
+
 ## 定常化を調べる
 
 入力を固定したときの定常化までの上界を `settle` で求める。同じ回路を CI で確認するときは、上限の tick 数を `--within` で指定する。
@@ -286,7 +297,7 @@ wasmtime run --dir=. target/wasm32-wasip2/debug/ncg2.wasm run --input 11 --input
 
 アウトラインでは、名前空間、`func`、`module` などの宣言を確認できる。識別子にカーソルを合わせると、解決した回路の署名や、型を確認できた信号の型・ビット幅を表示する。VS Code と Neovim の拡張では、名前空間、`func`、`module`、内部の信号、入出力ポートを色で区別する。
 
-インレイヒントに対応するエディタでは、定常化の上界を求められたモジュールの名前の横に「定常化 ≤ 2 tick」のように表示する。固定入力で内部のゲート値が揃うまでの上界で、解析には開いている依存ファイルの未保存の本文も使う。
+インレイヒントに対応するエディタでは、関数とモジュールを展開できた場合、宣言名の横に「NOR 3」のようにゲート数を表示する。定常化上界を求められたモジュールには「NOR 3 · 定常化 ≤ 2 tick」のように併記する。この上界は固定入力で内部ゲートの値が揃うまでの tick 数を表す。解析には、開いている依存ファイルの未保存の本文も使う。
 
 ## 開発
 

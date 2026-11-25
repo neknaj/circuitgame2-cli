@@ -15,6 +15,54 @@ fn cli(args: &[&str]) -> Output {
 }
 
 #[test]
+fn nor_count_expands_named_routines_and_counts_only_nor_gates() {
+    let source = "tests/fixtures/nor-count.ncg2";
+    let result = cli(&["nor-count", source]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.stderr.is_empty());
+    assert_eq!(
+        result.stdout,
+        b"::demo::one\t1\n::demo::twice\t2\n::demo::direct\t0\n::demo::oscillator\t1\n"
+    );
+
+    let selected = cli(&["nor-count", "--entry", "::demo::twice", source]);
+    assert!(selected.status.success());
+    assert_eq!(selected.stdout, b"::demo::twice\t2\n");
+
+    let storage = cli(&[
+        "nor-count",
+        "--project",
+        "examples/vram/circuitgame2.toml",
+        "--entry",
+        "::main",
+    ]);
+    assert!(
+        storage.status.success(),
+        "{}",
+        String::from_utf8_lossy(&storage.stderr)
+    );
+    assert_eq!(storage.stdout, b"::main\t0\n");
+}
+
+#[test]
+fn nor_count_reports_expansion_errors_at_the_source_and_prints_no_count() {
+    let result = cli(&[
+        "nor-count",
+        "--entry",
+        "::tests::capacity",
+        "tests/fixtures/clocked.ncg2",
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    let error = String::from_utf8(result.stderr).unwrap();
+    assert!(error.contains("tests/fixtures/clocked.ncg2"), "{error}");
+}
+
+#[test]
 fn settling_uses_the_project_entry_and_distinguishes_unproved_conditions() {
     let project = "examples/project/circuitgame2.toml";
     let automatic = cli(&["settle", "--project", project]);

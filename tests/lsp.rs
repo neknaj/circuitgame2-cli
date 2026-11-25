@@ -434,12 +434,49 @@ fn inlay_hints_follow_the_requested_range_and_latest_edit() {
     assert_eq!(response(1)["capabilities"]["inlayHintProvider"], true);
     let first = &response(2)[0];
     assert_eq!(first["position"], json!({"line": 1, "character": 13}));
-    assert_eq!(first["label"], "定常化 ≤ 1 tick");
+    assert_eq!(first["label"], "NOR 1 · 定常化 ≤ 1 tick");
     assert!(first.get("kind").is_none());
     assert!(first.get("textEdits").is_none());
     assert_eq!(response(3), &json!([]));
-    assert_eq!(response(4)[0]["label"], "定常化 ≤ 2 tick");
+    assert_eq!(response(4)[0]["label"], "NOR 2 · 定常化 ≤ 2 tick");
     assert_eq!(response(5), &json!([]));
+}
+
+#[test]
+fn inlay_hints_count_functions_and_modules_without_a_settling_bound() {
+    let uri = "untitled:counts.ncg2";
+    let source = "(using nor)\n(func direct (in x) (out x))\n(module oscillator (in) (out q) (def q (nor q q)))\n";
+    let responses = exchange([
+        request(1, "initialize", json!({"capabilities": {}})),
+        notification("initialized", json!({})),
+        notification(
+            "textDocument/didOpen",
+            json!({"textDocument": {
+                "uri": uri, "languageId": "ncg2", "version": 1, "text": source
+            }}),
+        ),
+        request(
+            2,
+            "textDocument/inlayHint",
+            json!({"textDocument": {"uri": uri}, "range": {
+                "start": {"line": 1, "character": 0},
+                "end": {"line": 3, "character": 0}
+            }}),
+        ),
+        request(3, "shutdown", Value::Null),
+        notification("exit", Value::Null),
+    ]);
+    let hints = responses
+        .iter()
+        .find(|response| response["id"] == 2)
+        .unwrap()["result"]
+        .as_array()
+        .unwrap();
+    assert_eq!(hints.len(), 2);
+    assert_eq!(hints[0]["position"], json!({"line": 1, "character": 12}));
+    assert_eq!(hints[0]["label"], "NOR 0");
+    assert_eq!(hints[1]["position"], json!({"line": 2, "character": 18}));
+    assert_eq!(hints[1]["label"], "NOR 1");
 }
 
 #[test]
@@ -526,8 +563,14 @@ fn inlay_hint_refreshes_when_an_open_dependency_changes() {
         .position(|response| response["method"] == "workspace/inlayHint/refresh")
         .unwrap();
     assert!(at(2) < refreshed && refreshed < at(3), "{responses:?}");
-    assert_eq!(responses[at(2)]["result"][0]["label"], "定常化 ≤ 1 tick");
-    assert_eq!(responses[at(3)]["result"][0]["label"], "定常化 ≤ 2 tick");
+    assert_eq!(
+        responses[at(2)]["result"][0]["label"],
+        "NOR 1 · 定常化 ≤ 1 tick"
+    );
+    assert_eq!(
+        responses[at(3)]["result"][0]["label"],
+        "NOR 2 · 定常化 ≤ 2 tick"
+    );
     assert_eq!(responses[at(4)]["result"], json!([]));
     assert!(
         responses[at(4) + 1..at(5)]
@@ -535,7 +578,10 @@ fn inlay_hint_refreshes_when_an_open_dependency_changes() {
             .any(|response| response["method"] == "workspace/inlayHint/refresh"),
         "{responses:?}"
     );
-    assert_eq!(responses[at(5)]["result"][0]["label"], "定常化 ≤ 1 tick");
+    assert_eq!(
+        responses[at(5)]["result"][0]["label"],
+        "NOR 1 · 定常化 ≤ 1 tick"
+    );
     let target = &responses[at(7)]["result"];
     assert_eq!(target["uri"], basis.as_str());
     assert!(responses[at(8)]["result"].is_null());
