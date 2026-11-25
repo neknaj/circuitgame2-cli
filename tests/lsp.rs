@@ -288,11 +288,21 @@ fn ncg2m_outline_uses_current_document_and_real_namespace_blocks() {
                 "textDocument/didChange",
                 json!({
                     "textDocument": {"uri": uri, "version": 3},
-                    "contentChanges": [{"text": "(defmacro fresh () (quote value))"}]
+                    "contentChanges": [{"text": format!(
+                        "; 🐈\n(defn bad) )\n{source}\n(namespace uncertain (defmacro hidden () (quote value))"
+                    )}]
                 }),
             ),
             request(4, "textDocument/documentSymbol", document.clone()),
-            request(5, "shutdown", Value::Null),
+            notification(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": {"uri": uri, "version": 4},
+                    "contentChanges": [{"text": "(defmacro fresh () (quote value))"}]
+                }),
+            ),
+            request(5, "textDocument/documentSymbol", document.clone()),
+            request(6, "shutdown", Value::Null),
             notification("exit", Value::Null),
         ]);
         let result = |id| {
@@ -322,8 +332,22 @@ fn ncg2m_outline_uses_current_document_and_real_namespace_blocks() {
             assert_eq!(symbols[2]["containerName"], "tools");
         }
         assert!(result(3).is_null());
-        assert_eq!(result(4).as_array().unwrap().len(), 1);
-        assert_eq!(result(4)[0]["name"], "fresh");
+        let recovered = result(4).as_array().unwrap();
+        assert_eq!(recovered.len(), symbols.len());
+        let mut moved = ready_span.clone();
+        moved["start"]["line"] = 2.into();
+        moved["end"]["line"] = 2.into();
+        if hierarchical {
+            assert_eq!(recovered[0]["children"][1]["name"], "ready");
+            assert_eq!(recovered[0]["children"][1]["selectionRange"], moved);
+            assert_eq!(recovered[1]["children"][0]["name"], "other");
+        } else {
+            assert_eq!(recovered[2]["name"], "ready");
+            assert_eq!(recovered[2]["location"]["range"], moved);
+            assert_eq!(recovered[4]["name"], "other");
+        }
+        assert_eq!(result(5).as_array().unwrap().len(), 1);
+        assert_eq!(result(5)[0]["name"], "fresh");
     }
 }
 

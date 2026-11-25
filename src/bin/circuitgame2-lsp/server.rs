@@ -10,7 +10,7 @@ use std::{
 
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding, TextPosition, prepare_source_edit},
-    ncg2m::file::{MetaItem, index_meta_file},
+    ncg2m::file::recovery::{MetaFileRecovery, recover_meta_file},
     project::SourceKind,
     syntax::circuit::CachedCircuitRecovery,
 };
@@ -58,7 +58,7 @@ enum DocumentAnalysis {
     },
     Functional {
         text: String,
-        items: Option<Vec<MetaItem>>,
+        outline: symbols::FunctionalOutline,
     },
 }
 
@@ -76,14 +76,16 @@ impl DocumentAnalysis {
                 (Self::Full(analysis), diagnostics)
             }
             SourceKind::Functional => {
-                let (items, diagnostics) = match index_meta_file(&text) {
-                    Ok(items) => (Some(items), Vec::new()),
-                    Err(error) => (
-                        None,
-                        diagnostic::render_meta_error(uri, &text, encoding, error),
+                let (outline, diagnostics) = match recover_meta_file(&text) {
+                    MetaFileRecovery::Complete(items) => {
+                        (symbols::FunctionalOutline::Complete(items), Vec::new())
+                    }
+                    MetaFileRecovery::Incomplete { first, lists, .. } => (
+                        symbols::FunctionalOutline::Fragments(lists),
+                        diagnostic::render_meta_error(uri, &text, encoding, first),
                     ),
                 };
-                (Self::Functional { text, items }, diagnostics)
+                (Self::Functional { text, outline }, diagnostics)
             }
         }
     }
@@ -456,19 +458,9 @@ impl Server {
                 encoding,
                 self.hierarchical_symbols,
             ),
-            (
-                SourceKind::Functional,
-                Some(DocumentAnalysis::Functional {
-                    text,
-                    items: Some(items),
-                }),
-            ) => Some(symbols::collect_functional(
-                uri,
-                text,
-                items,
-                encoding,
-                self.hierarchical_symbols,
-            )),
+            (SourceKind::Functional, Some(DocumentAnalysis::Functional { text, outline })) => {
+                outline.symbols(uri, text, encoding, self.hierarchical_symbols)
+            }
             (SourceKind::Functional, _) => None,
         };
         Response::new_ok(request.id, result)
