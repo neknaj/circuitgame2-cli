@@ -107,6 +107,140 @@ fn invalid_period_and_pin_conflict_leave_stdout_empty() {
     }
 }
 
+fn i2c_fixture() -> (String, String) {
+    let names = |prefix, start, end| {
+        (start..end)
+            .map(|i| format!("{prefix}{i}"))
+            .collect::<Vec<_>>()
+    };
+    let frame_inputs = names("r", 0, 13);
+    let frame_outputs = names("o", 0, 33);
+    let inputs = frame_inputs
+        .iter()
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let outputs = frame_outputs
+        .iter()
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let definitions = frame_outputs
+        .iter()
+        .map(|port| format!("(def {port} (nor button button))\n"))
+        .collect::<String>();
+    let circuit = format!(
+        "(using nor)\n(module main (in {inputs} button) (out {outputs} indicator)\n{definitions}(def indicator (nor button button)))"
+    );
+    let board = format!(
+        r#"board = "pico2"
+[[gpio]]
+direction = "input"
+port = "button"
+pin = 2
+[[gpio]]
+direction = "output"
+port = "indicator"
+pin = 3
+initial_high = true
+
+[i2c]
+instance = 0
+sda-pin = 0
+scl-pin = 1
+frequency-hz = 100000
+timeout-micros = 20000
+request-ready = "r0"
+response-valid = "r1"
+response-status = {:?}
+read-data = {:?}
+request-valid = "o0"
+response-ready = "o1"
+address = {:?}
+write-length = {:?}
+read-length = {:?}
+write-data = {:?}
+"#,
+        &frame_inputs[2..5],
+        &frame_inputs[5..],
+        &frame_outputs[2..9],
+        &frame_outputs[9..17],
+        &frame_outputs[17..25],
+        &frame_outputs[25..]
+    );
+    (circuit, board)
+}
+
+#[test]
+fn exports_i2c_settings_and_ports_in_their_respective_orders() {
+    let directory = tempdir().unwrap();
+    let (circuit, board) = i2c_fixture();
+    let output = plan(directory.path(), &circuit, PROJECT, &board);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut expected = String::from(
+        "ncg2-rp-i2c-v1\nboard pico2\nperiod-us 2000\ni2c 0 0 1 100000 20000 1\ni2c-outputs",
+    );
+    for port in (0..33).rev() {
+        expected.push_str(&format!(" {port}"));
+    }
+    expected.push('\n');
+    for index in (0..13).rev() {
+        expected.push_str(&format!("input-i2c {index}\n"));
+    }
+    expected.push_str("input 2\n");
+    expected.push_str(&"gate 13 13\n".repeat(34));
+    for wire in (14..47).rev().chain([47]) {
+        expected.push_str(&format!("port {wire}\n"));
+    }
+    expected.push_str("output 33 3 1\n");
+    assert_eq!(output.stdout, expected.as_bytes());
+}
+
+#[test]
+fn i2c_diagnostics_preserve_the_offending_setting_element() {
+    let directory = tempdir().unwrap();
+    let (circuit, board) = i2c_fixture();
+    let board = format!(
+        "# 日本語の前置き\n{}",
+        board.replace("\"o4\"", "\"不存在\"")
+    );
+    let result = plan(directory.path(), &circuit, PROJECT, &board);
+    let start = board.find("\"不存在\"").unwrap();
+    let end = start + "\"不存在\"".len();
+    let error = String::from_utf8(result.stderr).unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    assert!(
+        error.contains(&format!("board.toml[{start}..{end}]")),
+        "{error}"
+    );
+    assert!(error.contains("ポートが見つからない"), "{error}");
+
+    let (_, board) = i2c_fixture();
+    let board = board.replace("request-ready = \"r0\"", "request-ready = \"button\"");
+    let result = plan(directory.path(), &circuit, PROJECT, &board);
+    let first = board.find("[[gpio]]").unwrap();
+    let later = board.rfind("\"button\"").unwrap();
+    let error = String::from_utf8(result.stderr).unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    assert!(
+        error.contains(&format!(
+            "board.toml[{later}..{}]",
+            later + "\"button\"".len()
+        )),
+        "{error}"
+    );
+    assert!(error.contains(&format!("board.toml[{first}..")), "{error}");
+    assert!(error.contains("同じ回路入力を複数の接続が駆動"), "{error}");
+}
+
 const UART_CIRCUIT: &str = r#"(using nor)
 (module main
   (in r7 r6 r5 r4 r3 r2 r1 r0 received framing overrun ready sent ok button)
