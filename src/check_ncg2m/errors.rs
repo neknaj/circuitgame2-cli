@@ -19,7 +19,8 @@ use circuitgame2_core::{
         FuncSignalTypeError, FuncWiringError, LocatedName, MixedFuncArityError, MixedFuncCallError,
         MixedFuncCalleeError, MixedFuncDriverError, MixedFuncTypeError, MixedFuncWiringError,
         MixedTypedSignatureError, ParsedProjectSources, ProjectFileSyntaxError, ProjectSource,
-        ProjectSourceParseError, RoutineSignatureError, TypedSignatureError,
+        ProjectSourceParseError, RoutineSignatureError, SelectionArgumentError,
+        TypedSignatureError,
     },
 };
 
@@ -116,6 +117,26 @@ pub(super) fn mixed_function_types(
         }
         MixedFuncTypeError::Output(error) => {
             check_body::function_error(function, FuncSignalTypeError::CallOutput(error), report)
+        }
+        MixedFuncTypeError::SelectionInputType { reference, actual } => {
+            if let Some(report) = report {
+                report.body_error("selection_input_type", &reference, [&actual.origin]);
+            }
+            diagnostic::clocked::selection_input_type(&reference, &actual)
+        }
+        MixedFuncTypeError::SelectionArgument(error) => {
+            if let Some(report) = report {
+                let (site, width) = match &error {
+                    SelectionArgumentError::NaturalOverflow { site, .. }
+                    | SelectionArgumentError::ZeroCount { site }
+                    | SelectionArgumentError::ZeroStride { site } => (site, None),
+                    SelectionArgumentError::Outside {
+                        site, width_origin, ..
+                    } => (site, Some(width_origin)),
+                };
+                report.body_error("selection_argument", site, width);
+            }
+            diagnostic::clocked::selection(error)
         }
         MixedFuncTypeError::Signal(error) => {
             check_body::function_error(function, FuncSignalTypeError::Signal(error), report)
