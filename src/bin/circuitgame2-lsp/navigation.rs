@@ -24,7 +24,7 @@ use lsp_types::{
 
 use super::{
     diagnostic::wire_range,
-    sources::{OpenDocument, SourceSet},
+    sources::{DiskSyntaxCache, OpenDocument, SourceSet},
 };
 
 #[derive(Clone, Copy)]
@@ -74,11 +74,12 @@ fn head_word(head: Head) -> &'static str {
 fn with_project<'a, R>(
     current: OpenDocument<'a>,
     open: impl Iterator<Item = OpenDocument<'a>>,
+    disk: &DiskSyntaxCache,
     query: impl FnOnce(&CircuitProject<'_>, usize) -> Option<R>,
 ) -> Option<R> {
     let (id, sources) = SourceSet::load(current, open).ok()?;
     let path = normalize_path(&id).ok()?;
-    let project = sources.parse_strict().ok()?;
+    let project = sources.parse_strict_with_disk_cache(Some(disk)).ok()?;
     let file = project
         .sources()
         .iter()
@@ -224,11 +225,12 @@ pub(super) fn hover<'a>(
     position: TextPosition,
     encoding: PositionEncoding,
     open: impl Iterator<Item = OpenDocument<'a>>,
+    disk: &DiskSyntaxCache,
 ) -> Option<Hover> {
     let text = current.text?;
     let index = LineIndex::new(text);
     let offset = index.position_to_byte(position, encoding)?;
-    let (span, value) = with_project(current, open, |project, file| {
+    let (span, value) = with_project(current, open, disk, |project, file| {
         let local = &project.circuits()[file];
         let source = &project.sources()[file];
         let selected = local
@@ -448,10 +450,11 @@ pub(super) fn semantic<'a>(
     current: OpenDocument<'a>,
     encoding: PositionEncoding,
     open: impl Iterator<Item = OpenDocument<'a>>,
+    disk: &DiskSyntaxCache,
 ) -> Option<SemanticTokens> {
     let text = current.text?;
     let lines = LineIndex::new(text);
-    let mut sites = with_project(current, open, |project, file| {
+    let mut sites = with_project(current, open, disk, |project, file| {
         Some(token_sites(project, file))
     })
     .unwrap_or_else(|| {

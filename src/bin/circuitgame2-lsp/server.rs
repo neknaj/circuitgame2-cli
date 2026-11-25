@@ -261,7 +261,14 @@ impl Server {
             .documents
             .iter()
             .map(|(uri, document)| document.open_snapshot(uri));
-        let snapshot = inlay_hint::collect(document.open_snapshot(uri), start, end, encoding, open);
+        let snapshot = inlay_hint::collect(
+            document.open_snapshot(uri),
+            start,
+            end,
+            encoding,
+            open,
+            &self.disk_syntax,
+        );
         let hints = match snapshot {
             Some(snapshot) => {
                 if self.inlay_refresh {
@@ -341,7 +348,13 @@ impl Server {
             .map(|(uri, document)| document.open_snapshot(uri));
         Response::new_ok(
             request.id,
-            navigation::hover(document.open_snapshot(uri), position, encoding, open),
+            navigation::hover(
+                document.open_snapshot(uri),
+                position,
+                encoding,
+                open,
+                &self.disk_syntax,
+            ),
         )
     }
 
@@ -370,7 +383,13 @@ impl Server {
             .map(|(uri, document)| document.open_snapshot(uri));
         Response::new_ok(
             request.id,
-            navigation::semantic(palette, document.open_snapshot(uri), encoding, open),
+            navigation::semantic(
+                palette,
+                document.open_snapshot(uri),
+                encoding,
+                open,
+                &self.disk_syntax,
+            ),
         )
     }
 
@@ -428,7 +447,7 @@ impl Server {
             .documents
             .iter()
             .map(|(uri, document)| document.open_snapshot(uri));
-        match definition::locate(current, position, encoding, open) {
+        match definition::locate(current, position, encoding, open, &self.disk_syntax) {
             Ok(location) => Response::new_ok(request.id, location),
             Err(error) => Response::new_err(request.id, ErrorCode::RequestFailed as i32, error),
         }
