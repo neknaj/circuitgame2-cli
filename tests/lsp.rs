@@ -62,8 +62,9 @@ fn stdio_checks_ncg2m_after_sequential_edits_and_a_full_replacement() {
             }]),
         ),
         change(5, json!([replace(initial, "right", "value")])),
-        change(6, json!([{"text": ")"}])),
-        change(7, json!([{"text": initial}])),
+        change(6, json!([{"text": format!("bare {after_both}")}])),
+        change(7, json!([{"text": ")"}])),
+        change(8, json!([{"text": initial}])),
         request(
             2,
             "textDocument/documentSymbol",
@@ -88,7 +89,16 @@ fn stdio_checks_ncg2m_after_sequential_edits_and_a_full_replacement() {
         .collect();
     assert_eq!(
         versions,
-        [Some(1), Some(3), Some(4), Some(5), Some(6), Some(7), None]
+        [
+            Some(1),
+            Some(3),
+            Some(4),
+            Some(5),
+            Some(6),
+            Some(7),
+            Some(8),
+            None
+        ]
     );
     assert!(
         published
@@ -96,7 +106,7 @@ fn stdio_checks_ncg2m_after_sequential_edits_and_a_full_replacement() {
             .all(|publication| publication["uri"] == uri)
     );
     let reports = |index: usize| published[index]["diagnostics"].as_array().unwrap();
-    for index in [0, 2, 3, 5, 6] {
+    for index in [0, 2, 3, 6, 7] {
         assert!(reports(index).is_empty(), "{published:?}");
     }
     assert_eq!(reports(1).len(), 1);
@@ -117,8 +127,17 @@ fn stdio_checks_ncg2m_after_sequential_edits_and_a_full_replacement() {
     let related = &diagnostic["relatedInformation"][0]["location"];
     assert_eq!(related["uri"], uri);
     assert_eq!(related["range"], expected_range(first));
-    assert_eq!(reports(4).len(), 1);
-    assert_eq!(reports(4)[0]["code"], "UnexpectedClose");
+    assert_eq!(reports(4).len(), 2);
+    assert_eq!(reports(4)[0]["code"], "ExpectedMetaItem");
+    assert_eq!(reports(4)[0]["data"]["byteStart"], 0);
+    assert_eq!(reports(4)[0]["data"]["byteEnd"], "bare".len());
+    assert_eq!(reports(4)[1]["code"], "DuplicateDefnParameter");
+    assert_eq!(
+        reports(4)[1]["data"]["byteStart"],
+        "bare ".len() + duplicate
+    );
+    assert_eq!(reports(5).len(), 1);
+    assert_eq!(reports(5)[0]["code"], "UnexpectedClose");
     let symbols = responses.iter().find(|message| message["id"] == 2).unwrap();
     assert_eq!(symbols["result"].as_array().unwrap().len(), 2);
     assert_eq!(symbols["result"][0]["name"], "quoted");
@@ -258,6 +277,10 @@ fn ncg2m_outline_uses_current_document_and_real_namespace_blocks() {
         .count();
     let ready_span = json!({"start": {"line": 0, "character": ready_column},
                              "end": {"line": 0, "character": ready_column + 5}});
+    let damaged = format!(
+        "(use ::tools::demo prefix) (defn bad (as-type (Fn (Bool Bool) Bool) (fn (key key) \"🦊\")))\n\
+         )\n{source}\n(namespace uncertain (defmacro hidden () (quote value))"
+    );
     let document = json!({"textDocument": {"uri": uri}});
     for hierarchical in [false, true] {
         let responses = exchange([
@@ -288,11 +311,19 @@ fn ncg2m_outline_uses_current_document_and_real_namespace_blocks() {
                 "textDocument/didChange",
                 json!({
                     "textDocument": {"uri": uri, "version": 3},
-                    "contentChanges": [{"text": "(defmacro fresh () (quote value))"}]
+                    "contentChanges": [{"text": damaged}]
                 }),
             ),
             request(4, "textDocument/documentSymbol", document.clone()),
-            request(5, "shutdown", Value::Null),
+            notification(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": {"uri": uri, "version": 4},
+                    "contentChanges": [{"text": "(defmacro fresh () (quote value))"}]
+                }),
+            ),
+            request(5, "textDocument/documentSymbol", document.clone()),
+            request(6, "shutdown", Value::Null),
             notification("exit", Value::Null),
         ]);
         let result = |id| {
@@ -322,8 +353,54 @@ fn ncg2m_outline_uses_current_document_and_real_namespace_blocks() {
             assert_eq!(symbols[2]["containerName"], "tools");
         }
         assert!(result(3).is_null());
-        assert_eq!(result(4).as_array().unwrap().len(), 1);
-        assert_eq!(result(4)[0]["name"], "fresh");
+        let diagnostics = &responses
+            .iter()
+            .find(|message| {
+                message["method"] == "textDocument/publishDiagnostics"
+                    && message["params"]["version"] == 3
+            })
+            .unwrap()["params"]["diagnostics"];
+        let names: Vec<_> = diagnostics
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["DuplicateDefnParameter", "UnexpectedClose", "UnclosedList"]
+        );
+        let first = damaged.find("key key").unwrap();
+        let duplicate = first + "key ".len();
+        assert_eq!(diagnostics[0]["data"]["byteStart"], duplicate);
+        assert_eq!(
+            diagnostics[0]["data"]["related"],
+            json!([first, first + "key".len()])
+        );
+        let eof = damaged.len();
+        let opening = damaged.rfind("(namespace uncertain").unwrap();
+        assert_eq!(diagnostics[2]["data"]["byteStart"], eof);
+        assert_eq!(diagnostics[2]["data"]["byteEnd"], eof);
+        assert_eq!(
+            diagnostics[2]["data"]["related"],
+            json!([opening, opening + 1])
+        );
+        let recovered = result(4).as_array().unwrap();
+        assert_eq!(recovered.len(), symbols.len());
+        let mut moved = ready_span.clone();
+        moved["start"]["line"] = 2.into();
+        moved["end"]["line"] = 2.into();
+        if hierarchical {
+            assert_eq!(recovered[0]["children"][1]["name"], "ready");
+            assert_eq!(recovered[0]["children"][1]["selectionRange"], moved);
+            assert_eq!(recovered[1]["children"][0]["name"], "other");
+        } else {
+            assert_eq!(recovered[2]["name"], "ready");
+            assert_eq!(recovered[2]["location"]["range"], moved);
+            assert_eq!(recovered[4]["name"], "other");
+        }
+        assert_eq!(result(5).as_array().unwrap().len(), 1);
+        assert_eq!(result(5)[0]["name"], "fresh");
     }
 }
 
