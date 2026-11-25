@@ -5,8 +5,8 @@ use std::ops::Range;
 use circuitgame2_core::{
     ncg2m::file::MetaItemKind,
     project::{
-        AliasConflict, AliasDisposition, DefinitionAnalysisError, FuncArityError, FuncCallTarget,
-        LocatedName, MixedAbsoluteTarget, MixedUseAliasConflict, MixedUseAliases, MixedUseTargets,
+        AliasConflict, AliasDisposition, DefinitionAnalysisError, FuncWiringResult, LocatedName,
+        MixedAbsoluteTarget, MixedUseAliasConflict, MixedUseAliases, MixedUseTargets,
         ParsedProjectSources, ProjectSource, ProjectSourceIndex, SourceSnapshot, UseSite,
         check_mixed_use_aliases, index_mixed_use_targets, parse_project_sources,
         validate_mixed_circuit_basis,
@@ -14,7 +14,7 @@ use circuitgame2_core::{
     syntax::circuit::Head,
 };
 
-use super::{check_body, check_report::Report, diagnostic};
+use super::{WIDTH_LIMIT, check_report::Report, diagnostic};
 
 mod errors;
 mod evaluate;
@@ -34,9 +34,10 @@ pub(super) fn check(
         .plan_defn_calls()
         .map_err(|error| contextualize(errors::calls(&project, error, report)))?;
 
-    check_circuit_calls(&project, &aliases, report).map_err(&contextualize)?;
+    let first_expansion =
+        check_circuit_functions(&project, &aliases, report).map_err(&contextualize)?;
 
-    // 結線、型、マクロ本体の検査が終わるまで、プロジェクト全体の成功は報告しない。
+    // 回路の型検査や展開、マクロ本体の検査が未完了なら、プロジェクト全体の成功は報告しない。
     for (source, index) in project.sources().iter().zip(project.indexes()) {
         match index {
             ProjectSourceIndex::Functional(items) => {
@@ -54,6 +55,15 @@ pub(super) fn check(
                 }
             }
             ProjectSourceIndex::Circuit(circuit) => {
+                if let Some(expansion) = first_expansion {
+                    return Err(contextualize(failure(
+                        report,
+                        "unsupported_mixed_circuit_check",
+                        expansion,
+                        "回路関数のマクロ展開に未対応。",
+                        [],
+                    )));
+                }
                 let span = circuit
                     .names
                     .iter()
@@ -63,7 +73,7 @@ pub(super) fn check(
                     report,
                     "unsupported_mixed_circuit_check",
                     site(source, span),
-                    "NCG2M を含むプロジェクトでは、回路本体の検査には対応していない。",
+                    "NCG2M を含むプロジェクトでは、回路本体の型検査と展開が未対応。",
                     [],
                 )));
             }
@@ -134,73 +144,39 @@ fn resolve_aliases<'t, 'p, 'a>(
     Ok(aliases)
 }
 
-/// 関数の定義をソース順に調べ、呼び出し名または入力個数の最初の違反を返す。
-fn check_circuit_calls(
-    project: &ParsedProjectSources<'_>,
-    aliases: &MixedUseAliases<'_, '_, '_>,
+/// 関数をソース順に調べ、結線と入出力個数の最初の違反を返す。
+fn check_circuit_functions<'p, 'a>(
+    project: &'p ParsedProjectSources<'a>,
+    aliases: &MixedUseAliases<'_, 'p, 'a>,
     report: &mut Option<&mut Report<'_>>,
-) -> Result<(), String> {
+) -> Result<Option<LocatedName<'p, 'a>>, String> {
+    let mut first_expansion = None;
     for (file, index) in project.indexes().iter().enumerate() {
         let ProjectSourceIndex::Circuit(circuit) = index else {
             continue;
         };
-        for (entry, (item, ranges)) in circuit
-            .syntax
-            .entries
-            .iter()
-            .zip(&circuit.entry_ranges)
-            .enumerate()
-        {
+        for (entry, item) in circuit.syntax.entries.iter().enumerate() {
             if item.head != Head::Func {
                 continue;
             }
-            for (definition, row) in circuit.definitions[ranges.definitions.clone()]
-                .iter()
-                .enumerate()
+            let checked = aliases
+                .check_mixed_func_arity(file, entry, WIDTH_LIMIT)
+                .map_err(|error| {
+                    let span = circuit
+                        .names
+                        .iter()
+                        .find(|name| name.form == item.form)
+                        .map_or(0..0, |name| name.name.span.clone());
+                    errors::mixed_function(&site(&project.sources()[file], span), error, report)
+                })?;
+            if let FuncWiringResult::NeedsExpansion(expansion) = checked
+                && first_expansion.is_none()
             {
-                for reference in 0..row.references.len() {
-                    let Some(result) =
-                        aliases.resolve_mixed_func_call_arity(file, entry, definition, reference)
-                    else {
-                        continue;
-                    };
-                    let call = result.map_err(|error| errors::circuit_call(error, report))?;
-                    let location = site(call.source, call.call.span.clone());
-                    match call.check_input_count() {
-                        Ok(_) => {}
-                        Err(FuncArityError::ArgumentCount {
-                            call,
-                            target,
-                            expected,
-                            actual,
-                        }) => {
-                            let declaration = match &target {
-                                FuncCallTarget::Nor => None,
-                                FuncCallTarget::Function { declaration, .. } => Some(declaration),
-                            };
-                            return Err(check_body::argument_count(
-                                &call,
-                                expected,
-                                actual,
-                                declaration,
-                                report,
-                            ));
-                        }
-                        Err(_) => {
-                            return Err(failure(
-                                report,
-                                "circuit_call_check",
-                                location,
-                                "回路関数の呼び出しを検査できない。",
-                                [],
-                            ));
-                        }
-                    }
-                }
+                first_expansion = Some(expansion);
             }
         }
     }
-    Ok(())
+    Ok(first_expansion)
 }
 
 fn alias_name<'p, 'a>(directive: &UseSite<'p, 'a>) -> LocatedName<'p, 'a> {

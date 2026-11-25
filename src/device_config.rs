@@ -5,8 +5,8 @@ use std::{collections::BTreeMap, ops::Range, path::Path};
 use circuitgame2_core::{
     project::{
         DeviceBindingsError, DevicePortBindingError, DevicePortRequest, DevicePortType,
-        LocatedName, ModuleBodyPosition, PortDirection, PortWidthErrorKind, ResolvedPortType,
-        RoutineSignatureError, TypedSignatureError, UseAliases,
+        LocatedName, ModuleBodyPosition, PortDirection, ResolvedPortType, RoutineSignatureError,
+        TypedSignatureError, UseAliases,
     },
     time::TickPeriod,
 };
@@ -202,15 +202,7 @@ fn binding_diagnostic(
 fn signature_error(error: TypedSignatureError<'_, '_>) -> String {
     match error {
         TypedSignatureError::Signature(RoutineSignatureError::Width(error)) => {
-            let reason = match error.kind {
-                PortWidthErrorKind::Zero => "ポートの幅には正の整数を指定する。".to_owned(),
-                PortWidthErrorKind::NumericRange => {
-                    "ポートの幅が u64 の範囲を超えている。".to_owned()
-                }
-                PortWidthErrorKind::LimitExceeded { width, limit } => {
-                    format!("ポートの幅 {width} は上限 {limit} を超えている。")
-                }
-            };
+            let reason = diagnostic::port_width_reason(error.kind);
             let location = LocatedName {
                 source: error.source,
                 span: error.span,

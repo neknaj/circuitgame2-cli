@@ -116,7 +116,8 @@ fn body_unavailable(site: &LocatedName<'_, '_>, report: &mut Option<&mut Report<
         diagnostic::located(site)
     )
 }
-fn function_error(
+/// 関数の結線または型の違反を、元の位置と関連範囲を付けて示す。
+pub(super) fn function_error(
     function: &LocatedName<'_, '_>,
     error: FuncSignalTypeError<'_, '_>,
     report: &mut Option<&mut Report<'_>>,

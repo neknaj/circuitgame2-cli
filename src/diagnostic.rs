@@ -13,7 +13,7 @@ use circuitgame2_core::{
         AbsoluteTarget, AliasConflict, AliasDisposition, BitFuncError, CircuitBasisError,
         CircuitProject, CircuitProjectError, DefinitionAnalysisError, DefinitionBatchError,
         DefinitionReferenceReason, ExpandFunctionsError, ExportError, FunctionBuildDiagnostic,
-        FunctionExpansionError, LocatedName, ResolvedUse, UseTargetError,
+        FunctionExpansionError, LocatedName, PortWidthErrorKind, ResolvedUse, UseTargetError,
     },
     syntax::circuit::CircuitFormError,
 };
@@ -24,6 +24,17 @@ fn position(path: &str, span: &Range<usize>) -> String {
 
 pub(super) fn located(site: &LocatedName<'_, '_>) -> String {
     position(&site.source.id.components().join("/"), &site.span)
+}
+
+/// ポートの幅の違反を、指定値または適用した上限とともに示す。
+pub(super) fn port_width_reason(kind: PortWidthErrorKind) -> String {
+    match kind {
+        PortWidthErrorKind::Zero => "ポートの幅には正の整数を指定する。".into(),
+        PortWidthErrorKind::NumericRange => "ポートの幅が u64 の範囲を超えている。".into(),
+        PortWidthErrorKind::LimitExceeded { width, limit } => {
+            format!("ポートの幅 {width} は上限 {limit} を超えている。")
+        }
+    }
 }
 
 fn directive(site: &ResolvedUse<'_, '_>) -> String {

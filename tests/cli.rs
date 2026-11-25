@@ -236,6 +236,78 @@ fn mixed_check_reports_call_errors_with_original_cross_file_ranges() {
 }
 
 #[test]
+fn mixed_check_reports_wiring_and_output_count_with_related_ranges() {
+    let folder = tempfile::tempdir().unwrap();
+    let dir = folder.path();
+    let settings = dir.join("circuitgame2.toml");
+    let main = dir.join("main.ncg2");
+    let library = "(namespace lib (export pair) (func pair (in a b) (out a b)))";
+    fs::write(
+        &settings,
+        "sources = [\"main.ncg2\", \"library.ncg2\", \"helper.ncg2m\"]\n",
+    )
+    .unwrap();
+    fs::write(dir.join("library.ncg2"), library).unwrap();
+    fs::write(dir.join("helper.ncg2m"), "").unwrap();
+    let check = |source: &str| {
+        fs::write(&main, source).unwrap();
+        let result = cli(&[
+            "check",
+            "--format",
+            "json",
+            "--project",
+            settings.to_str().unwrap(),
+        ]);
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert!(result.stderr.is_empty());
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        report["diagnostics"][0].clone()
+    };
+    let location = |path: &str, start, len| serde_json::json!({"path": path, "range": {"start": start, "end": start + len}});
+
+    let forward = "(using nor) (func invalid (in a) (out y) (def y later) (def later a))";
+    let error = check(forward);
+    assert_eq!(error["code"], "forward_reference");
+    assert_eq!(
+        error["location"],
+        location("main.ncg2", forward.find("later").unwrap(), 5)
+    );
+    assert_eq!(
+        error["related"],
+        serde_json::json!([location("main.ncg2", forward.rfind("later").unwrap(), 5)])
+    );
+
+    let expansion = "(expand make)";
+    let waiting = format!("(using nor) (func waiting (in) (out z) {expansion})");
+    let error = check(&waiting);
+    assert_eq!(error["code"], "unsupported_mixed_circuit_check");
+    assert_eq!(
+        error["location"],
+        location(
+            "main.ncg2",
+            waiting.find(expansion).unwrap(),
+            expansion.len()
+        )
+    );
+
+    let too_many = format!("{waiting} (func invalid (in a b) (out y) (def y (::lib::pair a b)))");
+    let call = "(::lib::pair a b)";
+    let error = check(&too_many);
+    assert_eq!(error["code"], "output_count");
+    assert_eq!(
+        error["location"],
+        location("main.ncg2", too_many.find(call).unwrap(), call.len())
+    );
+    assert_eq!(
+        error["related"],
+        serde_json::json!([
+            location("main.ncg2", too_many.rfind("y (").unwrap(), 1),
+            location("library.ncg2", library.rfind("pair").unwrap(), 4)
+        ])
+    );
+}
+
+#[test]
 fn mixed_check_reports_basis_errors_before_resolving_names() {
     let folder = tempfile::tempdir().unwrap();
     let dir = folder.path();
