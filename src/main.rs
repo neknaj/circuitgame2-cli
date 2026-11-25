@@ -46,9 +46,9 @@ run は reset 直後を tick 0 とし、各行に tick 番号と出力ビット�
 settle は固定入力での定常化を解析する。ネイティブ版では未推定・未証明の終了コードは 2。\n\
 入出力はポートの宣言順に並べ、各ポート内は最下位ビットから記す。";
 
-const WIDTH_LIMIT: u64 = 65_536;
-const BIT_LIMIT: usize = 1_048_576;
-const GATE_LIMIT: usize = 1_048_576;
+const WIDTH_LIMIT: u64 = circuitgame2_cli::CLOCKED_LIMITS.width;
+const BIT_LIMIT: usize = circuitgame2_cli::CLOCKED_LIMITS.wiring_bits;
+const GATE_LIMIT: usize = circuitgame2_cli::CLOCKED_LIMITS.gates;
 
 enum Command<'a> {
     Help,
