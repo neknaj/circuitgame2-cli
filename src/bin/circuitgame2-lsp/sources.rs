@@ -10,7 +10,10 @@ use std::{
 use circuitgame2_cli::config;
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding},
-    project::{LocatedName, ProjectSource, SourceSnapshot, normalize_path},
+    project::{
+        CircuitProject, CircuitProjectError, LocatedName, ProjectSource, SourceSnapshot,
+        normalize_path, parse_circuit_project_with_cached_indexes,
+    },
     syntax::circuit::CachedCircuitRecovery,
 };
 use lsp_types::{Location, Uri};
@@ -186,6 +189,15 @@ impl<'a> SourceSet<'a> {
                 revision: source.revision,
             })
             .collect()
+    }
+
+    /// ソース集合を厳格に解析し、本文が一致する文書のビルド索引を再利用する。
+    ///
+    /// # Errors
+    ///
+    /// 構文、言語、ソース指定に違反があるとき、厳格解析の診断を返す。
+    pub(super) fn parse_strict(&self) -> Result<CircuitProject<'_>, CircuitProjectError<'_>> {
+        parse_circuit_project_with_cached_indexes(&self.snapshots(), &self.syntax_cache())
     }
 
     /// 開いている文書の回復結果を、ソーススナップショットと同じ順で返す。

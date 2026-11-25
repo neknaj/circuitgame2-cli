@@ -4,7 +4,7 @@ use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding, TextPosition},
     project::{
         CircuitProject, DefinitionBinding, LocatedName, VirtualPath, check_use_aliases,
-        index_use_targets, normalize_path, parse_circuit_project, validate_circuit_basis,
+        index_use_targets, normalize_path, validate_circuit_basis,
     },
 };
 use lsp_types::Location;
@@ -31,8 +31,7 @@ pub(super) fn locate<'a>(
         return Ok(None);
     };
     let (current_id, sources) = SourceSet::load(current, open)?;
-    let snapshots = sources.snapshots();
-    let Ok(project) = parse_circuit_project(&snapshots) else {
+    let Ok(project) = sources.parse_strict() else {
         return Ok(None);
     };
     let current_path = normalize_path(&current_id)

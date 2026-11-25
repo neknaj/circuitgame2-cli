@@ -5,10 +5,7 @@ use std::ops::Range;
 use circuitgame2_cli::CLOCKED_LIMITS;
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding, TextPosition},
-    project::{
-        check_use_aliases, index_use_targets, normalize_path, parse_circuit_project,
-        validate_circuit_basis,
-    },
+    project::{check_use_aliases, index_use_targets, normalize_path, validate_circuit_basis},
 };
 use lsp_types::{InlayHint, InlayHintLabel, InlayHintTooltip, Uri};
 
@@ -61,8 +58,7 @@ fn analyze(
     let Ok(path) = normalize_path(id) else {
         return Vec::new();
     };
-    let snapshots = sources.snapshots();
-    let Ok(project) = parse_circuit_project(&snapshots) else {
+    let Ok(project) = sources.parse_strict() else {
         return Vec::new();
     };
     let Some(file) = project

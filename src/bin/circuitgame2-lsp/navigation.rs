@@ -9,8 +9,7 @@ use circuitgame2_core::{
     project::{
         CircuitProject, DefinitionBinding, ModuleBodyPosition, ProjectSource, ResolvedPortType,
         SignalOccurrence, SignalOccurrenceKind, SignalRole, UseAliases, UseTargets,
-        check_use_aliases, index_use_targets, normalize_path, parse_circuit_project,
-        validate_circuit_basis,
+        check_use_aliases, index_use_targets, normalize_path, validate_circuit_basis,
     },
     syntax::{
         Form,
@@ -79,8 +78,7 @@ fn with_project<'a, R>(
 ) -> Option<R> {
     let (id, sources) = SourceSet::load(current, open).ok()?;
     let path = normalize_path(&id).ok()?;
-    let snapshots = sources.snapshots();
-    let project = parse_circuit_project(&snapshots).ok()?;
+    let project = sources.parse_strict().ok()?;
     let file = project
         .sources()
         .iter()
