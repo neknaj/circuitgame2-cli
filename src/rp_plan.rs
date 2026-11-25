@@ -7,8 +7,8 @@ use circuitgame2_core::time::exact_microseconds;
 use circuitgame2_core::{
     backend::rp::{
         AssignmentError, Board, GpioBinding, GpioCircuitImage, GpioImageError, GpioOutputPin,
-        PinSite, RpInputSource, UartCircuitImage, UartImageError, UartInputSignal, UartPortNames,
-        UartSetup,
+        PeripheralInputSource, PinSite, RpInputSource, Signal, UartCircuitImage, UartImageError,
+        UartInputSignal, UartPortNames, UartSetup,
     },
     netlist::PackedNorLayout32,
     project::{
@@ -20,6 +20,7 @@ use serde::Deserialize;
 use toml::Spanned;
 
 mod i2c;
+mod spi;
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -131,6 +132,7 @@ struct Wiring {
     gpio: Vec<Spanned<Gpio>>,
     uart: Option<Spanned<Uart>>,
     i2c: Option<Spanned<i2c::I2c>>,
+    spi: Option<Spanned<spi::Spi>>,
 }
 
 fn read_board(path: &Path) -> Result<Wiring, String> {
@@ -177,21 +179,132 @@ fn span(wiring: &Wiring, at: usize) -> Option<Range<usize>> {
         .or_else(|| wiring.uart.as_ref().map(Spanned::span))
 }
 
+/// Core に渡す周辺機能の信号順と、各設定値の診断位置を対応させる。
+struct PeripheralLocations<'a> {
+    name: &'static str,
+    instance: Range<usize>,
+    pins: &'a [(Signal, &'static str, Range<usize>)],
+    to: Vec<&'a Spanned<String>>,
+    from: Vec<&'a Spanned<String>>,
+}
+
+impl PeripheralLocations<'_> {
+    fn names(&self) -> (Vec<&str>, Vec<&str>) {
+        fn names<'a>(ports: &[&'a Spanned<String>]) -> Vec<&'a str> {
+            ports.iter().map(|port| port.get_ref().as_str()).collect()
+        }
+        (names(&self.to), names(&self.from))
+    }
+
+    fn pin(&self, signal: Signal) -> Option<(&'static str, Range<usize>)> {
+        self.pins
+            .iter()
+            .find_map(|(kind, name, span)| (*kind == signal).then(|| (*name, span.clone())))
+    }
+
+    fn request(&self, index: usize) -> Option<Range<usize>> {
+        let port = if index < self.to.len() {
+            self.to.get(index)
+        } else {
+            self.from.get(index - self.to.len())
+        };
+        port.map(|name| name.span())
+    }
+
+    fn assignment_error(&self, error: AssignmentError, board: &Path) -> String {
+        match error {
+            AssignmentError::UnknownInstance { instance, .. } => config::at(
+                board,
+                Some(self.instance.clone()),
+                &format!(
+                    "{} コントローラー番号は 0 または 1。指定値は {instance}。",
+                    self.name,
+                ),
+            ),
+            AssignmentError::UnsupportedSignal {
+                site,
+                pin,
+                instance,
+            } => {
+                let (signal, span) = self
+                    .pin(site.signal)
+                    .unwrap_or(("信号", self.instance.clone()));
+                config::at(
+                    board,
+                    Some(span),
+                    &format!(
+                        "GP{pin} は {}{instance} の {signal} に割り当てられない。",
+                        self.name
+                    ),
+                )
+            }
+            _ => config::at(
+                board,
+                None,
+                &format!(
+                    "{} のピンまたはコントローラーの割り当てに違反がある。",
+                    self.name
+                ),
+            ),
+        }
+    }
+}
+
+fn data_error(
+    board: &Path,
+    read: &Spanned<Vec<Spanned<String>>>,
+    write: &Spanned<Vec<Spanned<String>>>,
+) -> String {
+    let read_bits = read.get_ref().len();
+    let write_bits = write.get_ref().len();
+    let valid = |bits| (8..=255 * 8).contains(&bits) && bits % 8 == 0;
+    if !valid(read_bits) || !valid(write_bits) {
+        let (field, span, bits) = if !valid(read_bits) {
+            ("read-data", read.span(), read_bits)
+        } else {
+            ("write-data", write.span(), write_bits)
+        };
+        return config::at(
+            board,
+            Some(span),
+            &format!("`{field}` のポート名は {bits} 個。1〜255 バイト分を8個ずつ指定する。"),
+        );
+    }
+    format!(
+        "{}\n{}",
+        config::at(
+            board,
+            Some(write.span()),
+            &format!(
+                "`write-data` の容量は {} バイト。`read-data` と同じ容量を指定する。",
+                write_bits / 8
+            )
+        ),
+        config::at(
+            board,
+            Some(read.span()),
+            &format!("`read-data` の容量は {} バイト。", read_bits / 8)
+        ),
+    )
+}
+
 fn image_error(
     error: GpioImageError<'_, '_, '_>,
     board: &Path,
     wiring: &Wiring,
     source: &Source<'_, '_>,
-    i2c: Option<&i2c::Locations<'_>>,
+    peripheral: Option<&PeripheralLocations<'_>>,
 ) -> String {
-    let request_span = |index| match i2c {
+    let request_span = |index| match peripheral {
         Some(locations) if index >= wiring.gpio.len() => {
             locations.request(index - wiring.gpio.len())
         }
         _ => span(wiring, index),
     };
-    let pin_span = |site: PinSite| match i2c {
-        Some(locations) if site.assignment == wiring.gpio.len() => locations.pin(site.signal),
+    let pin_span = |site: PinSite| match peripheral {
+        Some(locations) if site.assignment == wiring.gpio.len() => {
+            locations.pin(site.signal).map(|(_, span)| span)
+        }
         _ => span(wiring, site.assignment),
     };
     let at = |index, reason: &str| config::at(board, request_span(index), reason);
@@ -211,8 +324,8 @@ fn image_error(
             pin_span(site),
             &format!("GP{pin} はボードの外部端子に出ていない。"),
         ),
-        GpioImageError::Pin(error) => match i2c {
-            Some(locations) => i2c::assignment_error(error, board, locations),
+        GpioImageError::Pin(error) => match peripheral {
+            Some(locations) => locations.assignment_error(error, board),
             None => config::at(
                 board,
                 wiring.uart.as_ref().map(Spanned::span),
@@ -235,7 +348,7 @@ fn image_error(
                 ),
             ),
             DevicePortBindingError::TypeMismatch { actual, .. } => {
-                let reason = if i2c.is_some() {
+                let reason = if peripheral.is_some() {
                     format!(
                         "RP の接続先には単一ビットが必要だが、指定したポートの型は {}。",
                         super::diagnostic::clocked::port_type(actual.ty)
@@ -263,8 +376,12 @@ fn image_error(
         GpioImageError::MissingInput { port } => config::at(
             board,
             None,
-            &if i2c.is_some() {
-                format!("回路入力 {} に GPIO または I²C の接続が必要。", port + 1)
+            &if let Some(locations) = peripheral {
+                format!(
+                    "回路入力 {} に GPIO または {} の接続が必要。",
+                    port + 1,
+                    locations.name
+                )
             } else if wiring.uart.is_some() {
                 format!("回路入力 {} に GPIO または UART の接続が必要。", port + 1)
             } else {
@@ -318,20 +435,25 @@ pub(super) fn export(
     }
     let period = period_micros(source.settings_path, source.settings)?;
     let wiring = read_board(board)?;
-    if let (Some(uart), Some(i2c)) = (&wiring.uart, &wiring.i2c) {
-        let (first, later) = if uart.span().start < i2c.span().start {
-            (uart.span(), i2c.span())
-        } else {
-            (i2c.span(), uart.span())
+    let mut peripherals = [
+        wiring.uart.as_ref().map(|entry| ("UART", entry.span())),
+        wiring.i2c.as_ref().map(|entry| ("I²C", entry.span())),
+        wiring.spi.as_ref().map(|entry| ("SPI", entry.span())),
+    ];
+    peripherals.sort_by_key(|entry| entry.as_ref().map_or(usize::MAX, |(_, span)| span.start));
+    if let [Some((first, first_span)), Some((later, later_span)), ..] = peripherals {
+        let pair = match (first, later) {
+            ("I²C", "UART") => "UART と I²C".to_owned(),
+            _ => format!("{first} と {later}"),
         };
         return Err(format!(
             "{}\n{}",
             config::at(
                 board,
-                Some(later),
-                "UART と I²C を同じ配線表に指定できない。"
+                Some(later_span),
+                &format!("{pair} を同じ配線表に指定できない。")
             ),
-            config::at(board, Some(first), "先に指定した周辺機能。"),
+            config::at(board, Some(first_span), "先に指定した周辺機能。"),
         ));
     }
     let bindings: Vec<_> = wiring
@@ -341,6 +463,11 @@ pub(super) fn export(
         .collect();
     if let Some(settings) = &wiring.i2c {
         return i2c::export(
+            stdout, &source, board, &wiring, settings, aliases, &bindings, period,
+        );
+    }
+    if let Some(settings) = &wiring.spi {
+        return spi::export(
             stdout, &source, board, &wiring, settings, aliases, &bindings, period,
         );
     }
@@ -459,4 +586,28 @@ fn write_layout(
         )?;
     }
     Ok(())
+}
+
+fn write_peripheral_layout(
+    out: &mut impl Write,
+    controller: &str,
+    inputs: &[PeripheralInputSource],
+    gpio_outputs: &[GpioOutputPin],
+    peripheral_outputs: &[usize],
+    layout: &PackedNorLayout32,
+) -> std::io::Result<()> {
+    write!(out, "{controller}-outputs")?;
+    for port in peripheral_outputs {
+        write!(out, " {port}")?;
+    }
+    writeln!(out)?;
+    for source in inputs {
+        match source {
+            PeripheralInputSource::Gpio(pin) => writeln!(out, "input {pin}")?,
+            PeripheralInputSource::Controller(index) => {
+                writeln!(out, "input-{controller} {index}")?
+            }
+        }
+    }
+    write_layout(out, layout, gpio_outputs)
 }

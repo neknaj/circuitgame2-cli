@@ -1,0 +1,9 @@
+(using nor)
+
+(module main
+  (in response-valid button request-ready status0 status1 status2 d0 d1 d2 d3 d4 d5 d6 d7)
+  (out button-signal one zero d1)
+  (def no-button (nor button button))
+  (def button-signal (nor no-button no-button))
+  (def one (nor 0 0))
+  (def zero (nor 1 1)))
