@@ -15,17 +15,18 @@ use circuitgame2_core::{
 use lsp_server::{ErrorCode, Message, Notification, Request, Response};
 use lsp_types::{
     CompletionOptions, CompletionParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    GotoDefinitionParams, InitializeParams, InitializeResult, InlayHintParams, OneOf,
-    PositionEncodingKind, PublishDiagnosticsParams, ServerCapabilities, ServerInfo,
-    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, Uri, VersionedTextDocumentIdentifier,
+    DocumentSymbolParams, GotoDefinitionParams, HoverParams, InitializeParams, InitializeResult,
+    InlayHintParams, OneOf, PositionEncodingKind, PublishDiagnosticsParams, SemanticTokensParams,
+    ServerCapabilities, ServerInfo, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, Uri, VersionedTextDocumentIdentifier,
 };
 
 use super::{
     completion, definition,
     diagnostic::{self, LocalRecovery},
-    inlay_hint,
+    inlay_hint, navigation,
     sources::{self, OpenDocument, ProjectKey, STANDALONE_ID, SourcePaths, SourceSet},
+    symbols,
 };
 
 #[derive(Clone, Copy, Default)]
@@ -80,6 +81,8 @@ struct Server {
     encoding: Option<PositionEncoding>,
     documents: HashMap<Uri, Document>,
     inlay_refresh: bool,
+    hierarchical_symbols: bool,
+    semantic_palette: Option<navigation::SemanticPalette>,
     hint_dependencies: HashMap<Uri, Vec<Uri>>,
     next_refresh_id: u64,
 }
@@ -129,6 +132,9 @@ impl Server {
             }
             (State::Ready, "textDocument/completion") => self.completion(request),
             (State::Ready, "textDocument/definition") => self.definition(request),
+            (State::Ready, "textDocument/documentSymbol") => self.document_symbols(request),
+            (State::Ready, "textDocument/hover") => self.hover(request),
+            (State::Ready, "textDocument/semanticTokens/full") => self.semantic_tokens(request),
             (State::Ready, "textDocument/inlayHint") => self.settling_hints(request),
             (State::Ready, method) if method != "initialize" => Response::new_err(
                 request.id,
@@ -173,6 +179,19 @@ impl Server {
             .workspace
             .and_then(|workspace| workspace.inlay_hint)
             .is_some_and(|hint| hint.refresh_support == Some(true));
+        let document = parameters.capabilities.text_document.as_ref();
+        self.hierarchical_symbols = document
+            .and_then(|document| document.document_symbol.as_ref())
+            .is_some_and(|symbols| symbols.hierarchical_document_symbol_support == Some(true));
+        let custom = parameters
+            .initialization_options
+            .as_ref()
+            .and_then(|options| options.get("ncg2SemanticTokens"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        self.semantic_palette = document
+            .and_then(|document| document.semantic_tokens.as_ref())
+            .and_then(|capabilities| navigation::SemanticPalette::new(capabilities, custom));
         self.state = State::AwaitingInitialized;
         self.encoding = Some(encoding);
         Response::new_ok(
@@ -182,6 +201,12 @@ impl Server {
                     position_encoding: Some(wire_encoding),
                     completion_provider: Some(CompletionOptions::default()),
                     definition_provider: Some(OneOf::Left(true)),
+                    document_symbol_provider: Some(OneOf::Left(true)),
+                    hover_provider: Some(true.into()),
+                    semantic_tokens_provider: self
+                        .semantic_palette
+                        .as_ref()
+                        .map(navigation::SemanticPalette::capability),
                     inlay_hint_provider: Some(OneOf::Left(true)),
                     text_document_sync: Some(TextDocumentSyncCapability::Options(
                         TextDocumentSyncOptions {
@@ -278,6 +303,94 @@ impl Server {
             .iter()
             .map(|(uri, doc)| doc.open_snapshot(uri));
         let result = completion::collect(document.open_snapshot(uri), position, encoding, open);
+        Response::new_ok(request.id, result)
+    }
+
+    fn hover(&self, request: Request) -> Response {
+        let params: HoverParams = match serde_json::from_value(request.params) {
+            Ok(params) => params,
+            Err(error) => {
+                return Response::new_err(
+                    request.id,
+                    ErrorCode::InvalidParams as i32,
+                    error.to_string(),
+                );
+            }
+        };
+        let params = params.text_document_position_params;
+        let position = match text_position(params.position) {
+            Ok(position) => position,
+            Err(error) => {
+                return Response::new_err(
+                    request.id,
+                    ErrorCode::InvalidParams as i32,
+                    error.into(),
+                );
+            }
+        };
+        let uri = &params.text_document.uri;
+        let (Some(document), Some(encoding)) = (self.documents.get(uri), self.encoding) else {
+            return Response::new_ok(request.id, ());
+        };
+        let open = self
+            .documents
+            .iter()
+            .map(|(uri, document)| document.open_snapshot(uri));
+        Response::new_ok(
+            request.id,
+            navigation::hover(document.open_snapshot(uri), position, encoding, open),
+        )
+    }
+
+    fn semantic_tokens(&self, request: Request) -> Response {
+        let params: SemanticTokensParams = match serde_json::from_value(request.params) {
+            Ok(params) => params,
+            Err(error) => {
+                return Response::new_err(
+                    request.id,
+                    ErrorCode::InvalidParams as i32,
+                    error.to_string(),
+                );
+            }
+        };
+        let uri = &params.text_document.uri;
+        let (Some(document), Some(encoding), Some(palette)) = (
+            self.documents.get(uri),
+            self.encoding,
+            self.semantic_palette.as_ref(),
+        ) else {
+            return Response::new_ok(request.id, ());
+        };
+        let open = self
+            .documents
+            .iter()
+            .map(|(uri, document)| document.open_snapshot(uri));
+        Response::new_ok(
+            request.id,
+            navigation::semantic(palette, document.open_snapshot(uri), encoding, open),
+        )
+    }
+
+    fn document_symbols(&self, request: Request) -> Response {
+        let params: DocumentSymbolParams = match serde_json::from_value(request.params) {
+            Ok(params) => params,
+            Err(error) => {
+                return Response::new_err(
+                    request.id,
+                    ErrorCode::InvalidParams as i32,
+                    error.to_string(),
+                );
+            }
+        };
+        let uri = &params.text_document.uri;
+        let (Some(document), Some(encoding)) = (self.documents.get(uri), self.encoding) else {
+            return Response::new_ok(request.id, ());
+        };
+        let result = symbols::collect(
+            document.open_snapshot(uri),
+            encoding,
+            self.hierarchical_symbols,
+        );
         Response::new_ok(request.id, result)
     }
 
