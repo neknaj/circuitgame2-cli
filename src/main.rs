@@ -29,8 +29,8 @@ const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価して�
   ncg2 check --project <設定ファイル>\n\
   ncg2 eval --func <関数名> --input <ビット列> <ファイル>...\n\
   ncg2 eval --func <関数名> --input <ビット列> --project <設定ファイル>\n\
-  ncg2 run [--entry <モジュール名>] [--input <ビット列>]... <ファイル>...\n\
-  ncg2 run --project <設定ファイル> [--input <ビット列>]... [--vram <公開名>]...\n\
+  ncg2 run [--entry <モジュール名>] [--input <ビット列> ... | --ticks <回数>] <ファイル>...\n\
+  ncg2 run --project <設定ファイル> [--input <ビット列> ... | --ticks <回数>] [--vram <公開名>]...\n\
   ncg2 settle [--within <tick 数> [--period <間隔>]] [--entry <モジュール名>] <ファイル>...\n\
   ncg2 settle [--within <tick 数> [--period <間隔>]] --project <設定ファイル>\n\
   ncg2 --help\n\
@@ -41,7 +41,8 @@ const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価して�
 run と settle の --project はソースファイルの列挙や --entry と併用できない。\n\
 宣言名には ::gate や ::lib::gate のような完全修飾名を使う。\n\
 run の既定の開始点は ::main。--input 一つにつき 1 tick 進める。\n\
-入力ポートがない回路は --input= で 1 tick 進める。\n\
+入力ポートがない回路は --ticks <回数> で指定回数だけ進める。--input= でも 1 tick 進められる。\n\
+--ticks と --input は併用できない。--ticks 0 は reset 直後の出力だけを表示する。\n\
 run は reset 直後を tick 0 とし、各行に tick 番号と出力ビット列を表示する。\n\
 --vram を指定すると、指定順に各 VRAM の記憶部を追加する。\n\
 settle は固定入力での定常化を解析する。ネイティブ版では未推定・未証明の終了コードは 2。\n\
@@ -62,7 +63,7 @@ enum Command<'a> {
     },
     Run {
         entry: &'a str,
-        frames: Vec<&'a str>,
+        frames: clocked::InputFrames<'a>,
         vram: Vec<&'a str>,
         sources: SourceInput<'a>,
     },
@@ -125,6 +126,7 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
     let mut entry = None;
     let mut project = None;
     let mut frames = Vec::new();
+    let mut ticks = None;
     let mut vram = Vec::new();
     let mut end_options = false;
     while let Some((option, rest)) = args.split_first() {
@@ -133,7 +135,11 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
                 let (name, rest) = rest
                     .split_first()
                     .filter(|(value, _)| {
-                        *value != "--project" && *value != "--vram" && !value.starts_with("--vram=")
+                        *value != "--project"
+                            && *value != "--vram"
+                            && !value.starts_with("--vram=")
+                            && *value != "--ticks"
+                            && !value.starts_with("--ticks=")
                     })
                     .ok_or("--entry には宣言名を指定する。")?;
                 entry = Some(name.as_str());
@@ -148,7 +154,11 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
                 let (frame, rest) = rest
                     .split_first()
                     .filter(|(value, _)| {
-                        *value != "--project" && *value != "--vram" && !value.starts_with("--vram=")
+                        *value != "--project"
+                            && *value != "--vram"
+                            && !value.starts_with("--vram=")
+                            && *value != "--ticks"
+                            && !value.starts_with("--ticks=")
                     })
                     .ok_or("--input にはビット列を指定する。")?;
                 frames.push(frame.as_str());
@@ -156,6 +166,21 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
             }
             "--input=" => {
                 frames.push("");
+                args = rest;
+            }
+            option if option == "--ticks" || option.starts_with("--ticks=") => {
+                if ticks.is_some() {
+                    return Err("--ticks は一度だけ指定できる。".into());
+                }
+                let (value, rest) = match option.strip_prefix("--ticks=") {
+                    Some(value) => (value, rest),
+                    None => {
+                        let (value, rest) =
+                            rest.split_first().ok_or("--ticks には回数を指定する。")?;
+                        (value.as_str(), rest)
+                    }
+                };
+                ticks = Some(tick_count("--ticks", value)?);
                 args = rest;
             }
             "--vram" => {
@@ -181,6 +206,11 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
     if project.is_none() && !vram.is_empty() {
         return Err("--vram を使う場合は --project を指定する。".into());
     }
+    let frames = match ticks {
+        Some(_) if !frames.is_empty() => return Err("--ticks と --input は併用できない。".into()),
+        Some(ticks) => clocked::InputFrames::EmptyTicks(ticks),
+        None => clocked::InputFrames::Explicit(frames),
+    };
     let sources = module_sources("run", project, entry, args, end_options)?;
     Ok(Command::Run {
         entry: entry.unwrap_or("::main"),
@@ -526,7 +556,7 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<ExitCode, String> {
             ModuleBodyPosition { file, entry },
             clocked::TraceOptions {
                 name,
-                frames: &frames,
+                frames,
                 vram: &vram,
                 settings: settings.as_ref().map(|(path, settings)| (*path, settings)),
             },
