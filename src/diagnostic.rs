@@ -157,6 +157,7 @@ pub(super) fn reference_reason(
 pub(super) fn analysis_error(
     error: DefinitionAnalysisError<'_, '_>,
     contextualize: impl Fn(String) -> String,
+    print_warnings: bool,
 ) -> String {
     match error {
         DefinitionAnalysisError::Basis(CircuitBasisError::Missing) => {
@@ -169,7 +170,9 @@ pub(super) fn analysis_error(
         ),
         DefinitionAnalysisError::Alias(conflict) => alias_error(conflict),
         DefinitionAnalysisError::Definition { error, aliases } => {
-            alias_warnings(&aliases, contextualize);
+            if print_warnings {
+                alias_warnings(&aliases, contextualize);
+            }
             reference_error(error)
         }
         DefinitionAnalysisError::UseTarget(error) => match error {

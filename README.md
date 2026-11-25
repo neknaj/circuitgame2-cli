@@ -27,6 +27,17 @@ ncg2 eval --func ::gate --input 00 examples/nor.ncg2
 
 検査に成功すると `検査成功（1 ファイル）` と表示される。`eval` は 0 と 0 を入力し、NOR の出力 `1` を表示する。`--input 01` では `0` が返る。
 
+## 検査結果と構文索引を JSON で取得する
+
+```sh
+ncg2 check --format json examples/nor.ncg2
+ncg2 dump examples/nor.ncg2
+```
+
+`check` は構文、名前解決、回路本体の結線と型を検査する。`--format json` を指定すると、検査結果を標準出力に JSON で書き、検査に失敗した場合は終了コード 1 を返す。`diagnostics` にはエラーや警告の種別とメッセージがあり、位置が分かる診断にはソースのパスと範囲が付く。
+
+`dump` は構文木、宣言、参照の索引を出力する。構文が正しければ、解決できない名前を含むファイルでも参照の位置を調べられる。両コマンドで `--project circuitgame2.toml` を指定できる。範囲の `start` は UTF-8 のバイト位置で、`end` の位置は含まない。
+
 ## 順序回路を動かす
 
 ```sh

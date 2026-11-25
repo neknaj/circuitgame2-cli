@@ -19,10 +19,10 @@ path = "src/bin/circuitgame2-lsp/main.rs"
 [dependencies]
 circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "2dfb373ba3b28be0fdf3daa1771d4bd039f441c9" }
 circuitgame2-project-config = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "2dfb373ba3b28be0fdf3daa1771d4bd039f441c9" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [target.'cfg(not(target_os = "wasi"))'.dependencies]
 lsp-server = "0.7.9"
 lsp-types = "0.97.0"
-serde = "1"
-serde_json = "1"
 url = "2.5.9"

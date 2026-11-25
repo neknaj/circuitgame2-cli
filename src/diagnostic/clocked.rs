@@ -376,7 +376,7 @@ fn structure_layout_error(site: &str, error: StructureTypeError<'_, '_>) -> Stri
     }
 }
 
-fn calls(site: &str, error: ModuleCallsError<'_, '_>) -> String {
+pub(crate) fn calls(site: &str, error: ModuleCallsError<'_, '_>) -> String {
     match error {
         ModuleCallsError::Module(ModuleOutputTypesError::Mismatch {
             expected, actual, ..
@@ -540,7 +540,7 @@ fn concat_error(site: &str, error: ModuleConcatsError<'_, '_>) -> String {
 }
 
 /// 連接と実引数で共通のリテラル幅診断を表示する。
-fn literal_width_error(error: CircuitLiteralWidthError) -> String {
+pub(crate) fn literal_width_error(error: CircuitLiteralWidthError) -> String {
     match error {
         CircuitLiteralWidthError::InvalidLiteral => {
             "ビットリテラルには 0、1、二進表記、十六進表記を使う。".into()
@@ -683,7 +683,7 @@ fn call_ports(site: &str, error: ModuleCallPortsError<'_, '_>) -> String {
     message
 }
 
-fn port_type(ty: ResolvedPortType<'_, '_>) -> String {
+pub(crate) fn port_type(ty: ResolvedPortType<'_, '_>) -> String {
     match ty {
         ResolvedPortType::Bits(width) => format!("{width} ビットのビット列"),
         ResolvedPortType::Struct { form, .. } => match &form.namespace {

@@ -421,16 +421,67 @@ fn namespace_selection_and_diagnostics_preserve_file_boundaries() {
     assert!(stderr.contains("invalid.ncg2 ["));
     assert!(stderr.contains("UnclosedList"));
 
+    let machine = run(&["check", "--format", "json", "invalid.ncg2"]);
+    assert_eq!(machine.status.code(), Some(1));
+    assert!(machine.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["diagnostics"][0]["code"], "syntax");
+    assert_eq!(report["diagnostics"][0]["location"]["path"], "invalid.ncg2");
+
     fs::write(
         folder.0.join("invalid.ncg2"),
         "(using nor) (func broken (in x) (out y) (def y (unknown x)))",
     )
     .unwrap();
+    let machine = run(&["check", "--format=json", "invalid.ncg2"]);
+    assert_eq!(machine.status.code(), Some(1));
+    assert!(machine.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(report["files"], 1);
+    assert_eq!(report["diagnostics"][0]["code"], "missing_reference");
+    let dump = run(&["dump", "invalid.ncg2"]);
+    assert!(dump.status.success());
+    let dump: serde_json::Value = serde_json::from_slice(&dump.stdout).unwrap();
+    assert_eq!(dump["version"], 1);
+    let source = &dump["sources"][0];
+    assert_eq!(source["symbols"][0]["name"], "broken");
+    let reference = &source["references"][0];
+    let form = reference["form"].as_u64().unwrap() as usize;
+    assert_eq!(source["forms"][form]["text"], "unknown");
+    assert_eq!(
+        reference["range"],
+        report["diagnostics"][0]["location"]["range"]
+    );
+
     let missing = run(&["check", "invalid.ncg2"]);
     assert_eq!(missing.status.code(), Some(1));
     let stderr = String::from_utf8(missing.stderr).unwrap();
     assert!(stderr.contains("invalid.ncg2 ["));
     assert!(stderr.contains("unknown が見つからない"));
+
+    let wrong_type = "; 日本語のコメント\n(using nor)\n(func bad (in (wide (bits 3))) (out (target (bits 2))) (def target wide))";
+    fs::write(folder.0.join("wrong-type.ncg2"), wrong_type).unwrap();
+    let plain = run(&["check", "wrong-type.ncg2"]);
+    assert_eq!(plain.status.code(), Some(1));
+    assert!(
+        String::from_utf8(plain.stderr)
+            .unwrap()
+            .contains("駆動元の型")
+    );
+    let machine = run(&["check", "--format", "json", "wrong-type.ncg2"]);
+    assert_eq!(machine.status.code(), Some(1));
+    assert!(machine.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    let error = &report["diagnostics"][0];
+    let start = wrong_type.rfind("wide").unwrap();
+    assert_eq!(error["code"], "output_type_mismatch");
+    assert_eq!(error["location"]["path"], "wrong-type.ncg2");
+    assert_eq!(
+        error["location"]["range"],
+        serde_json::json!({"start": start, "end": start + 4})
+    );
+    assert_eq!(error["related"].as_array().unwrap().len(), 2);
 }
 
 #[test]

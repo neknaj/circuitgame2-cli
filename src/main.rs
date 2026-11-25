@@ -1,8 +1,11 @@
 //! UTF-8 の NCG2 ファイルを読み込み、回路を検査・評価・実行する。
 
+mod check_body;
+mod check_report;
 mod clocked;
 mod device_config;
 mod diagnostic;
+mod dump;
 mod settling;
 
 use std::{
@@ -25,8 +28,10 @@ use circuitgame2_core::{
 
 const HELP: &str = "NCG2 の回路ソースを検査し、関数を評価してモジュールを実行する。\n\
 \n\
-  ncg2 check <ファイル>...\n\
-  ncg2 check --project <設定ファイル>\n\
+  ncg2 check [--format json] <ファイル>...\n\
+  ncg2 check [--format json] --project <設定ファイル>\n\
+  ncg2 dump <ファイル>...\n\
+  ncg2 dump --project <設定ファイル>\n\
   ncg2 eval --func <関数名> --input <ビット列> <ファイル>...\n\
   ncg2 eval --func <関数名> --input <ビット列> --project <設定ファイル>\n\
   ncg2 run [--entry <モジュール名>] [--input <ビット列> ... | --ticks <回数>] <ファイル>...\n\
@@ -55,7 +60,11 @@ const GATE_LIMIT: usize = circuitgame2_cli::CLOCKED_LIMITS.gates;
 enum Command<'a> {
     Help,
     Version,
-    Check(SourceInput<'a>),
+    Check {
+        sources: SourceInput<'a>,
+        json: bool,
+    },
+    Dump(SourceInput<'a>),
     Eval {
         name: &'a str,
         input: &'a str,
@@ -291,7 +300,23 @@ fn command(args: &[String]) -> Result<Command<'_>, String> {
     match args {
         [flag] if flag == "--help" || flag == "-h" => Ok(Command::Help),
         [flag] if flag == "--version" => Ok(Command::Version),
-        [check, files @ ..] if check == "check" => Ok(Command::Check(source_input(files)?)),
+        [check, files @ ..] if check == "check" => {
+            let (json, files) = match files {
+                [option, value, remaining @ ..] if option == "--format" && value == "json" => {
+                    (true, remaining)
+                }
+                [option, remaining @ ..] if option == "--format=json" => (true, remaining),
+                [option, ..] if option == "--format" || option.starts_with("--format=") => {
+                    return Err("--format では json を指定する。".into());
+                }
+                _ => (false, files),
+            };
+            Ok(Command::Check {
+                sources: source_input(files)?,
+                json,
+            })
+        }
+        [dump, files @ ..] if dump == "dump" => Ok(Command::Dump(source_input(files)?)),
         [eval, func_flag, name, input_flag, input, files @ ..]
             if eval == "eval"
                 && func_flag == "--func"
@@ -433,6 +458,27 @@ fn declaration_position(
 
 fn run(args: &[String], stdout: &mut impl Write) -> Result<ExitCode, String> {
     let command = command(args)?;
+    if let Command::Check {
+        sources,
+        json: true,
+    } = command
+    {
+        let project = match sources {
+            SourceInput::Files(_) => None,
+            SourceInput::Project(path) => Some(path),
+        };
+        let mut report = check_report::Report::new(project);
+        let result = execute(command, &mut io::sink(), Some(&mut report));
+        return report.finish(result, stdout);
+    }
+    execute(command, stdout, None)
+}
+
+fn execute(
+    command: Command<'_>,
+    stdout: &mut impl Write,
+    mut report: Option<&mut check_report::Report<'_>>,
+) -> Result<ExitCode, String> {
     let input = match &command {
         Command::Help => {
             return writeln!(stdout, "{HELP}")
@@ -444,7 +490,8 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<ExitCode, String> {
                 .map_err(output_error)
                 .map(|()| ExitCode::SUCCESS);
         }
-        Command::Check(sources)
+        Command::Check { sources, .. }
+        | Command::Dump(sources)
         | Command::Eval { sources, .. }
         | Command::Run { sources, .. }
         | Command::Settle { sources, .. } => *sources,
@@ -465,7 +512,7 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<ExitCode, String> {
         }
         SourceInput::Project(path) => {
             let path = Path::new(path);
-            let settings = if matches!(command, Command::Check(_)) {
+            let settings = if matches!(command, Command::Check { .. } | Command::Dump(_)) {
                 config::read_settings(path)?
             } else {
                 config::read(path)?
@@ -491,34 +538,56 @@ fn run(args: &[String], stdout: &mut impl Write) -> Result<ExitCode, String> {
         Some((path, _)) => config::source_diagnostic(path, &message),
         None => message,
     };
-    let project = parse_circuit_project(&snapshots)
-        .map_err(|error| source_diagnostic(diagnostic::project_error(error)))?;
-    let analysis = analyze_definitions(&project).map_err(|error| {
-        source_diagnostic(diagnostic::analysis_error(error, &source_diagnostic))
+    let project = parse_circuit_project(&snapshots).map_err(|error| {
+        if let Some(report) = &mut report {
+            report.project_error(&error);
+        }
+        source_diagnostic(diagnostic::project_error(error))
     })?;
-    diagnostic::alias_warnings(&analysis.aliases, &source_diagnostic);
+    if let Some(report) = &mut report {
+        report.files = Some(project.sources().len());
+    }
+    if matches!(command, Command::Dump(_)) {
+        return dump::write(&project, stdout).map(|()| ExitCode::SUCCESS);
+    }
+    let analysis = analyze_definitions(&project).map_err(|error| {
+        if let Some(report) = &mut report {
+            report.analysis_error(&error);
+        }
+        source_diagnostic(diagnostic::analysis_error(
+            error,
+            &source_diagnostic,
+            report.is_none(),
+        ))
+    })?;
+    if let Some(report) = &mut report {
+        report.warnings(&analysis.aliases);
+    } else {
+        diagnostic::alias_warnings(&analysis.aliases, &source_diagnostic);
+    }
 
-    if matches!(command, Command::Check(_))
-        && let Some((path, settings)) = &settings
-        && !settings.device.is_empty()
-    {
-        let name = settings
-            .entry
-            .as_ref()
-            .map_or("::main", |name| name.get_ref());
-        let (file, entry) =
-            declaration_position(&project, &analysis.aliases.targets, name, Head::Module).map_err(
-                |error| {
-                    config::at(
-                        path,
-                        settings.entry.as_ref().map(|entry| entry.span()),
-                        &error,
-                    )
-                },
-            )?;
+    if matches!(command, Command::Check { .. }) {
         let aliases = check_use_aliases(&analysis.aliases.targets)
             .map_err(|error| source_diagnostic(diagnostic::alias_error(error)))?;
-        device_config::check(path, settings, &aliases, ModuleBodyPosition { file, entry })?;
+        check_body::check(&project, &aliases, &mut report).map_err(&source_diagnostic)?;
+        if let Some((path, settings)) = &settings
+            && !settings.device.is_empty()
+        {
+            let name = settings
+                .entry
+                .as_ref()
+                .map_or("::main", |name| name.get_ref());
+            let (file, entry) =
+                declaration_position(&project, &analysis.aliases.targets, name, Head::Module)
+                    .map_err(|error| {
+                        config::at(
+                            path,
+                            settings.entry.as_ref().map(|entry| entry.span()),
+                            &error,
+                        )
+                    })?;
+            device_config::check(path, settings, &aliases, ModuleBodyPosition { file, entry })?;
+        }
     }
 
     let (name, kind) = match &command {
