@@ -10,8 +10,8 @@ use circuitgame2_core::{
     ncg2m::{
         call_evaluation::scalar::{
             ScalarBindingError, ScalarEntryError, ScalarExecution, ScalarExecutionError,
-            ScalarExecutionSlice, ScalarFoldExecution, ScalarFoldSlice, ScalarValue,
-            prepare_scalar_entry, prepare_scalar_fold,
+            ScalarExecutionSlice, ScalarFoldExecution, ScalarFoldSlice, ScalarLetExecution,
+            ScalarLetSlice, ScalarValue, prepare_scalar_entry, prepare_scalar_fold, prepare_scalar_let,
         },
         data_types::{DataType, DataTypeAtom},
         integers::{IntegerType, IntegerValue, read_integer_literal},
@@ -44,6 +44,7 @@ fn interruption() -> Result<impl Fn() -> bool, String> {
 enum Evaluation<'plan, 'p, 'a> {
     Scalar(ScalarExecution<'plan, 'p, 'a>),
     Fold(ScalarFoldExecution<'p, 'a>),
+    Let(ScalarLetExecution<'plan, 'p, 'a>),
 }
 
 enum EvaluationStep<'plan, 'p, 'a> {
@@ -68,6 +69,13 @@ impl<'plan, 'p, 'a> Evaluation<'plan, 'p, 'a> {
                 (result.map(|step| match step {
                     ScalarFoldSlice::Suspended(next) => EvaluationStep::Suspended(Self::Fold(next)),
                     ScalarFoldSlice::Complete(value) => EvaluationStep::Complete(value),
+                }), used)
+            }
+            Self::Let(state) => {
+                let (result, used) = state.run_slice_with_steps(fuel);
+                (result.map(|step| match step {
+                    ScalarLetSlice::Suspended(next) => EvaluationStep::Suspended(Self::Let(next)),
+                    ScalarLetSlice::Complete(value) => EvaluationStep::Complete(value),
                 }), used)
             }
         }
@@ -167,13 +175,16 @@ pub(in super::super) fn evaluate(
         Ok(entry) => entry.start(arguments).map(Evaluation::Scalar),
         Err(error) => match error {
             ScalarEntryError::UnsupportedFragment => {
-                let Some(entry) = prepare_scalar_fold(&plan, position) else {
+                if let Some(entry) = prepare_scalar_fold(&plan, position) {
+                    entry.start(arguments).map(Evaluation::Fold)
+                } else if let Some(entry) = prepare_scalar_let(&plan, position) {
+                    entry.start(arguments).map(Evaluation::Let)
+                } else {
                     return Err(contextualize(format!(
                         "{} 本体または呼び出し先にスカラー評価の対象外の式や型がある。",
                         diagnostic::located(&declaration.name)
                     )));
-                };
-                entry.start(arguments).map(Evaluation::Fold)
+                }
             }
             ScalarEntryError::UnknownDefinition => {
                 return Err(contextualize(format!(

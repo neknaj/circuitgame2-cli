@@ -15,3 +15,9 @@
     (fn (index acc)
       (fold-nat index acc (index acc)
         (add acc (mul (sub (add index 2) 1) 2))))))
+
+(defn parallel-bindings
+  (as-type (Fn (Nat) Nat)
+    (fn (x)
+      (let ((x 4) (y x))
+        (add x y)))))

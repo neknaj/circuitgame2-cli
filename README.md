@@ -70,6 +70,12 @@ ncg2 eval --func ::twice --input 1 design.ncg2 macros.ncg2m
 ncg2 eval-meta --defn ::fold-sum --arg Nat:4 --arg Nat:7 examples/helpers.ncg2m
 ```
 
+補助関数の本体全体を `let` にすると、初期化式にリテラルや仮引数の参照、補助関数の呼び出しを使える。初期化式は左から順に元の環境で評価する。次の例では初期化中の `x` は仮引数の `3`、本体の `x` は局所の `4` を指し、結果は `7` になる。
+
+```sh
+ncg2 eval-meta --defn ::parallel-bindings --arg Nat:3 examples/helpers.ncg2m
+```
+
 整数演算は同じ型の二つの引数を取る。結果が `Nat` または `Int` の値域を外れると、演算式を書いたファイルとバイト範囲を診断に表示する。
 
 `--fuel` で指定した回数で評価が終わらなければ、標準エラー出力にその旨を表示し、値を出さずに終了する。終了状態はネイティブ版ではコード 2、WASI Preview 2 版では失敗となる。Unix と Windows では Ctrl+C で評価を中断できる。中断した場合は標準出力に値を書かず、終了コード 130 を返す。

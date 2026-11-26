@@ -211,6 +211,56 @@ fn eval_meta_runs_nested_fold_arithmetic_with_scoped_bindings() {
 }
 
 #[test]
+fn eval_meta_evaluates_let_initializers_in_the_original_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("lexical.ncg2m");
+    let source = r#"
+(defn increment (as-type (Fn (Nat) Nat) (fn (x) (add x 1))))
+(defn twice (as-type (Fn (Nat) Nat) (fn (x) (mul x 2))))
+(defn down (as-type (Fn (Nat) Nat) (fn (x) (sub x 1))))
+(defn underflow (as-type (Fn () Int) (fn () (sub -9223372036854775808 1))))
+(defn parallel
+  (as-type (Fn (Nat) Nat)
+    (fn (x)
+      (let ((x (increment x)) (y (twice x)))
+        (add x y)))))
+(defn first-error
+  (as-type (Fn (Nat) Nat)
+    (fn (x)
+      (let ((a (down x)) (b (underflow)))
+        a))))
+"#;
+    fs::write(&file, source).unwrap();
+    let settings = dir.path().join("circuitgame2.toml");
+    fs::write(&settings, "sources = [\"lexical.ncg2m\"]\n").unwrap();
+    let path = settings.to_str().unwrap();
+    let evaluate = |defn: &str, input: &str, fuel: &str| {
+        cli(&["eval-meta", "--defn", defn, "--arg", input, "--fuel", fuel, "--steps", "--project", path])
+    };
+
+    let success = evaluate("::parallel", "Nat:3", "1000");
+    assert!(success.status.success(), "{success:?}");
+    assert_eq!(success.stdout, b"10\n");
+    let interrupted = evaluate("::parallel", "Nat:3", "1");
+    assert_eq!(interrupted.status.code(), Some(2), "{interrupted:?}");
+    assert!(interrupted.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&interrupted.stderr).ends_with("steps=1\n"));
+
+    for (input, expression, expected_type) in [
+        ("Nat:0", "(sub x 1)", "Nat"),
+        ("Nat:1", "(sub -9223372036854775808 1)", "Int"),
+    ] {
+        let failed = evaluate("::first-error", input, "1000");
+        assert_eq!(failed.status.code(), Some(1), "{failed:?}");
+        assert!(failed.stdout.is_empty());
+        let start = source.find(expression).unwrap();
+        let error = String::from_utf8(failed.stderr).unwrap();
+        assert!(error.contains(&format!("lexical.ncg2m [{start}..{}]", start + expression.len())));
+        assert!(error.contains(&format!("`sub` の計算結果は {expected_type} の範囲外")));
+    }
+}
+
+#[test]
 fn eval_meta_reports_integer_arithmetic_at_the_original_helper() {
     let folder = tempfile::tempdir().unwrap();
     let dir = folder.path();
