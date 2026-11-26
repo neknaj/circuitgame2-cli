@@ -1,15 +1,15 @@
 //! NCG2M を含むソース集合に対し、Core が扱う静的検査を実行する。
 
-use std::ops::Range;
+use std::{num::NonZeroUsize, ops::Range};
 
 use circuitgame2_core::{
     ncg2m::file::MetaItemKind,
     project::{
         AliasConflict, AliasDisposition, DefinitionAnalysisError, FuncWiringResult, LocatedName,
         MixedAbsoluteTarget, MixedUseAliasConflict, MixedUseAliases, MixedUseTargets,
-        ParsedProjectSources, ProjectSource, ProjectSourceIndex, SourceSnapshot, UseSite,
-        check_mixed_use_aliases, index_mixed_use_targets, parse_project_sources,
-        validate_mixed_circuit_basis,
+        ParsedProjectSources, ProjectDeclaration, ProjectDeclarationKind, ProjectSource,
+        ProjectSourceIndex, ResolvedDefmacro, SourceSnapshot, UseSite, check_mixed_use_aliases,
+        index_mixed_use_targets, parse_project_sources, validate_mixed_circuit_basis,
     },
     syntax::circuit::Head,
 };
@@ -18,6 +18,10 @@ use super::{WIDTH_LIMIT, check_report::Report, diagnostic};
 
 mod errors;
 mod evaluate;
+mod expansion;
+
+// 一件の展開に割り当てる評価器の遷移数。使い切った場合は成功を報告しない。
+const EXPANSION_FUEL: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
 
 pub(super) use evaluate::{evaluate, parse_argument};
 
@@ -35,55 +39,101 @@ pub(super) fn check(
         .map_err(|error| contextualize(errors::calls(&project, error, report)))?;
 
     let pending = check_circuit_functions(&project, &aliases, report).map_err(&contextualize)?;
+    let uses_expansion = !pending.expansions.is_empty();
+    if uses_expansion {
+        for (file, entry, call) in pending.expansions {
+            check_expanded_function(&aliases, file, entry, || call, report)
+                .map_err(&contextualize)?;
+        }
+        if let Some(argument) = pending.argument {
+            return Err(contextualize(unsupported(
+                report,
+                argument,
+                "この実引数の型は、混在プロジェクトの検査では確定できない。",
+            )));
+        }
+        for (file, entry) in pending.plain {
+            check_expanded_function(
+                &aliases,
+                file,
+                entry,
+                || function_location(&project, file, entry),
+                report,
+            )
+            .map_err(&contextualize)?;
+        }
+    }
 
-    // 回路の型検査や展開、マクロ本体の検査が未完了なら、プロジェクト全体の成功は報告しない。
-    for (source, index) in project.sources().iter().zip(project.indexes()) {
+    // 展開を検査できても、未検査のマクロ本体や回路フォームが残る場合は成功にしない。
+    for (file, (source, index)) in project.sources().iter().zip(project.indexes()).enumerate() {
         match index {
             ProjectSourceIndex::Functional(items) => {
-                if let Some(body) = items.iter().find_map(|item| match &item.kind {
-                    MetaItemKind::Defmacro { body, .. } => Some(body.clone()),
-                    _ => None,
-                }) {
+                for (item, indexed) in items.iter().enumerate() {
+                    let MetaItemKind::Defmacro {
+                        name,
+                        parameters,
+                        body,
+                    } = &indexed.kind
+                    else {
+                        continue;
+                    };
+                    if uses_expansion {
+                        let definition = ResolvedDefmacro {
+                            declaration: ProjectDeclaration {
+                                file,
+                                item,
+                                kind: ProjectDeclarationKind::Defmacro,
+                                name: site(source, name.clone()),
+                            },
+                            parameters,
+                            body,
+                        };
+                        match project.check_defmacro_body(&definition) {
+                            Some(Ok(_)) => continue,
+                            Some(Err(error)) => {
+                                return Err(contextualize(expansion::body(
+                                    source, error, None, report,
+                                )));
+                            }
+                            None => {}
+                        }
+                    }
                     return Err(contextualize(failure(
                         report,
                         "unsupported_macro_body",
-                        site(source, body),
+                        site(source, body.clone()),
                         "マクロ本体の検査には対応していない。",
                         [],
                     )));
                 }
             }
             ProjectSourceIndex::Circuit(circuit) => {
-                // 展開が必要なフォームを型が未確定の実引数より先に報告する。
-                if let Some(expansion) = pending.expansion {
-                    return Err(contextualize(failure(
-                        report,
-                        "unsupported_mixed_circuit_check",
-                        expansion,
-                        "回路関数のマクロ展開に未対応。",
-                        [],
-                    )));
-                }
                 if let Some(argument) = pending.argument {
-                    return Err(contextualize(failure(
+                    return Err(contextualize(unsupported(
                         report,
-                        "unsupported_mixed_circuit_check",
                         argument,
                         "この実引数の型は、混在プロジェクトの検査では確定できない。",
-                        [],
                     )));
+                }
+                if uses_expansion {
+                    if let Some(other) = pending.other {
+                        return Err(contextualize(unsupported(
+                            report,
+                            other,
+                            "この回路フォームの検査は混在プロジェクトでは未対応。",
+                        )));
+                    }
+                    continue;
                 }
                 let span = circuit
                     .names
                     .iter()
                     .find(|form| matches!(form.head, Head::Func | Head::Module))
                     .map_or(0..0, |form| form.name.span.clone());
-                return Err(contextualize(failure(
+                return Err(contextualize(unsupported(
                     report,
-                    "unsupported_mixed_circuit_check",
                     site(source, span),
                     "混在プロジェクトでは、回路本体の検査と展開に未対応の処理がある。",
-                    [],
                 )));
             }
         }
@@ -155,7 +205,9 @@ fn resolve_aliases<'t, 'p, 'a>(
 
 #[derive(Default)]
 struct PendingCircuitChecks<'p, 'a> {
-    expansion: Option<LocatedName<'p, 'a>>,
+    expansions: Vec<(usize, usize, LocatedName<'p, 'a>)>,
+    plain: Vec<(usize, usize)>,
+    other: Option<LocatedName<'p, 'a>>,
     argument: Option<LocatedName<'p, 'a>>,
 }
 
@@ -171,34 +223,94 @@ fn check_circuit_functions<'p, 'a>(
             continue;
         };
         for (entry, item) in circuit.syntax.entries.iter().enumerate() {
+            let source = &project.sources()[file];
             if item.head != Head::Func {
+                if pending.other.is_none()
+                    && !matches!(
+                        item.head,
+                        Head::Using | Head::Namespace | Head::Use | Head::Export
+                    )
+                {
+                    pending.other = Some(site(
+                        source,
+                        match &circuit.syntax.forms[item.form] {
+                            circuitgame2_core::syntax::Form::List { span, .. }
+                            | circuitgame2_core::syntax::Form::Atom { span, .. } => span.clone(),
+                        },
+                    ));
+                }
                 continue;
             }
             let checked = aliases
                 .check_mixed_func_input_types(file, entry, WIDTH_LIMIT)
                 .map_err(|error| {
-                    let span = circuit
-                        .names
-                        .iter()
-                        .find(|name| name.form == item.form)
-                        .map_or(0..0, |name| name.name.span.clone());
                     errors::mixed_function_types(
-                        &site(&project.sources()[file], span),
+                        &function_location(project, file, entry),
                         error,
                         report,
                     )
                 })?;
-            if let FuncWiringResult::NeedsExpansion(expansion) = checked.outputs.literals.wiring
-                && pending.expansion.is_none()
-            {
-                pending.expansion = Some(expansion);
+            if let FuncWiringResult::NeedsExpansion(expansion) = checked.outputs.literals.wiring {
+                pending.expansions.push((file, entry, expansion));
+                continue;
             }
+            pending.plain.push((file, entry));
             if pending.argument.is_none() {
                 pending.argument = checked.deferred_argument;
             }
         }
     }
     Ok(pending)
+}
+
+fn function_location<'p, 'a>(
+    project: &'p ParsedProjectSources<'a>,
+    file: usize,
+    entry: usize,
+) -> LocatedName<'p, 'a> {
+    let ProjectSourceIndex::Circuit(circuit) = &project.indexes()[file] else {
+        unreachable!("回路関数の位置には回路の索引が必要");
+    };
+    let item = &circuit.syntax.entries[entry];
+    let span = circuit
+        .names
+        .iter()
+        .find(|name| name.form == item.form)
+        .map_or(0..0, |name| name.name.span.clone());
+    site(&project.sources()[file], span)
+}
+
+// この経路は本体全体を検査する。従来の型検査では、左辺の型が未確定のまま残ることがある。
+fn check_expanded_function<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>,
+    file: usize,
+    entry: usize,
+    location: impl FnOnce() -> LocatedName<'p, 'a>,
+    report: &mut Option<&mut Report<'_>>,
+) -> Result<(), String> {
+    match aliases.check_expanded_bit_func(file, entry, WIDTH_LIMIT, EXPANSION_FUEL) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(unsupported(
+            report,
+            location(),
+            "この関数の本体を混在プロジェクトで検査できない。",
+        )),
+        Err(error) => Err(expansion::wiring(error, location(), report)),
+    }
+}
+
+fn unsupported(
+    report: &mut Option<&mut Report<'_>>,
+    location: LocatedName<'_, '_>,
+    reason: &str,
+) -> String {
+    failure(
+        report,
+        "unsupported_mixed_circuit_check",
+        location,
+        reason,
+        [],
+    )
 }
 
 fn alias_name<'p, 'a>(directive: &UseSite<'p, 'a>) -> LocatedName<'p, 'a> {

@@ -261,7 +261,7 @@ fn mixed_function(
     )
 }
 
-fn mixed_signature<'p, 'a>(
+pub(super) fn mixed_signature<'p, 'a>(
     error: MixedTypedSignatureError<'p, 'a>,
     caller: Option<LocatedName<'p, 'a>>,
     report: &mut Option<&mut Report<'_>>,
@@ -351,7 +351,26 @@ fn circuit_reference<'p, 'a>(
     caller: Option<(&'static str, LocatedName<'p, 'a>)>,
     report: &mut Option<&mut Report<'_>>,
 ) -> String {
-    let (code, message, related) = match reason {
+    let (code, message, related) = circuit_reference_details(reason, missing, expected);
+    failure(
+        report,
+        code,
+        reference,
+        message,
+        related.into_iter().chain(caller),
+    )
+}
+
+pub(super) fn circuit_reference_details<'p, 'a, 'm>(
+    reason: MixedFuncCalleeError<'p, 'a>,
+    missing: &'m str,
+    expected: &'m str,
+) -> (
+    &'static str,
+    &'m str,
+    Option<(&'static str, LocatedName<'p, 'a>)>,
+) {
+    match reason {
         MixedFuncCalleeError::Missing => ("missing_reference", missing, None),
         MixedFuncCalleeError::MissingPrefix => (
             "missing_reference_prefix",
@@ -378,14 +397,7 @@ fn circuit_reference<'p, 'a>(
             expected,
             Some(("名前が指す宣言", declaration.name)),
         ),
-    };
-    failure(
-        report,
-        code,
-        reference,
-        message,
-        related.into_iter().chain(caller),
-    )
+    }
 }
 
 pub(super) fn calls(
@@ -558,7 +570,7 @@ fn expression(
 
 type ExpressionDiagnostic = (Range<usize>, String, Option<(&'static str, Range<usize>)>);
 
-fn expression_type(error: ExpressionTypeError<'_>) -> ExpressionDiagnostic {
+pub(super) fn expression_type(error: ExpressionTypeError<'_>) -> ExpressionDiagnostic {
     let (span, message) = match error {
         ExpressionTypeError::Arguments {
             span,
