@@ -3,11 +3,11 @@
 use std::io::Write;
 
 use circuitgame2_core::{
-    project::{CircuitProject, ModuleBodyPosition, UseAliases},
+    project::{CircuitProject, ClockedModuleVmLimits, ModuleBodyPosition, UseAliases},
     syntax::circuit::{Head, named_build_entry},
 };
 
-use super::{BIT_LIMIT, GATE_LIMIT, WIDTH_LIMIT, clocked::LIMITS, diagnostic, output_error};
+use super::{BIT_LIMIT, GATE_LIMIT, WIDTH_LIMIT, diagnostic, output_error};
 
 /// 指定した宣言、または全関数と全モジュールを展開し、完全修飾名と個数を書く。
 ///
@@ -20,6 +20,7 @@ pub(super) fn write(
     project: &CircuitProject<'_>,
     aliases: &UseAliases<'_, '_, '_>,
     requested: Option<&str>,
+    limits: ClockedModuleVmLimits,
     source_diagnostic: impl Fn(String) -> String,
     out: &mut impl Write,
 ) -> Result<(), String> {
@@ -75,7 +76,7 @@ pub(super) fn write(
                 let entry = named_build_entry(source.text(), circuit, name_index);
                 let owner = ModuleBodyPosition { file, entry };
                 aliases
-                    .lower_clocked_vm(owner, LIMITS)
+                    .lower_clocked_vm(owner, limits)
                     .map_err(|error| {
                         source_diagnostic(diagnostic::clocked::error(project, owner, &name, error))
                     })?

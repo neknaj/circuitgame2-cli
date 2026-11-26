@@ -19,6 +19,30 @@ fn cli_in(directory: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn project_can_override_the_simulation_state_capacity() {
+    let folder = tempfile::tempdir().unwrap();
+    fs::write(
+        folder.path().join("main.ncg2"),
+        "(using nor)\n(memory bank (address 15) (data (bits 64)))\n\
+         (module main (in (address (bits 15))) (out (value (bits 64)))\n\
+           (def value (bank address #x0000000000000000 0)))\n",
+    )
+    .unwrap();
+    let settings = folder.path().join("circuitgame2.toml");
+    let args = ["run", "--project", "circuitgame2.toml"];
+    fs::write(&settings, "sources = [\"main.ncg2\"]\n").unwrap();
+    let default = cli_in(folder.path(), &args);
+    assert!(default.status.success(), "{default:?}");
+
+    fs::write(&settings, "sources = [\"main.ncg2\"]\nstate-bits = 128\n").unwrap();
+    let limited = cli_in(folder.path(), &args);
+    assert!(!limited.status.success());
+    assert!(limited.stdout.is_empty());
+    let stderr = String::from_utf8(limited.stderr).unwrap();
+    assert!(stderr.contains("記憶領域が容量上限を超える"), "{stderr}");
+}
+
+#[test]
 fn check_reads_ncg2m_directly_and_through_project_settings() {
     let example = "examples/helpers.ncg2m";
     let result = cli(&["check", example]);

@@ -2,9 +2,11 @@
 
 use std::{io::Write, num::NonZeroU64, process::ExitCode};
 
-use circuitgame2_core::project::{CircuitProject, ModuleBodyPosition, UseAliases};
+use circuitgame2_core::project::{
+    CircuitProject, ClockedModuleVmLimits, ModuleBodyPosition, UseAliases,
+};
 
-use super::{clocked::LIMITS, diagnostic, output_error};
+use super::{diagnostic, output_error};
 
 /// 固定入力で経過 tick 数が上界に達してから繰り返す間隔。
 pub(super) struct Condition {
@@ -19,11 +21,12 @@ pub(super) fn analyze(
     position: ModuleBodyPosition,
     name: &str,
     condition: Option<Condition>,
+    limits: ClockedModuleVmLimits,
     source_diagnostic: impl Fn(String) -> String,
     stdout: &mut impl Write,
 ) -> Result<ExitCode, String> {
     let compiled = aliases
-        .lower_clocked_vm(position, LIMITS)
+        .lower_clocked_vm(position, limits)
         .map_err(|error| {
             source_diagnostic(diagnostic::clocked::error(project, position, name, error))
         })?

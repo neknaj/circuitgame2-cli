@@ -285,6 +285,8 @@ ncg2 settle --project examples/project/circuitgame2.toml --within 1 --period 2
 
 `--project` は設定のソース一覧と `entry` を使う。ファイルを直接指定するときは `--entry ::main` のように開始点を選べる。公開 VRAM と読み出し信号の対応は `run --project` で検査する。
 
+順序回路の総状態容量は既定で8,388,608ビット。RAM とラッチの合計が上限を超える場合は、`circuitgame2.toml` の `state-bits` に必要なビット数を指定する。[プロジェクト設定](https://neknaj.github.io/circuitgame2/docs/project-config.html)
+
 ## 自分のファイルを使う
 
 [ラッチの例題](examples/latch.ncg2)を自分の回路用ディレクトリに `main.ncg2` として保存する。そのディレクトリへ移動して、インストールした CLI を実行する。
