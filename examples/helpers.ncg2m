@@ -9,3 +9,9 @@
   (as-type (Fn (Nat Nat) Nat)
     (fn (index acc)
       (fold-nat index acc (index acc) index))))
+
+(defn fold-sum
+  (as-type (Fn (Nat Nat) Nat)
+    (fn (index acc)
+      (fold-nat index acc (index acc)
+        (add acc (mul (sub (add index 2) 1) 2))))))
