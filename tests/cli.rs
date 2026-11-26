@@ -147,6 +147,31 @@ fn eval_meta_selects_a_checked_helper_and_respects_the_fuel_budget() {
     assert!(error.contains("helper.ncg2m") && error.contains("非公開"));
 }
 
+
+#[test]
+fn eval_meta_runs_fold_body_with_local_bindings_and_resumes_across_slices() {
+    let evaluate = |count, fuel| {
+        cli(&[
+            "eval-meta", "--defn", "::last-index", "--arg", count, "--arg", "Nat:7",
+            "--fuel", fuel, "--steps", "examples/helpers.ncg2m",
+        ])
+    };
+
+    let empty = evaluate("Nat:0", "3");
+    assert!(empty.status.success(), "{empty:?}");
+    assert_eq!(empty.stdout, b"7\n");
+    assert_eq!(empty.stderr, b"steps=3\n");
+
+    let suspended = evaluate("Nat:2048", "4098");
+    assert_eq!(suspended.status.code(), Some(2), "{suspended:?}");
+    assert!(suspended.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&suspended.stderr).ends_with("steps=4098\n"));
+
+    let completed = evaluate("Nat:2048", "4099");
+    assert!(completed.status.success(), "{completed:?}");
+    assert_eq!(completed.stdout, b"2047\n");
+    assert_eq!(completed.stderr, b"steps=4099\n");
+}
 #[test]
 fn eval_meta_reports_integer_arithmetic_at_the_original_helper() {
     let folder = tempfile::tempdir().unwrap();
