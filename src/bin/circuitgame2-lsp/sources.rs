@@ -11,7 +11,7 @@ use circuitgame2_cli::config;
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding},
     project::{
-        CircuitProject, CircuitProjectError, LocatedName, ProjectSource, SourceSnapshot,
+        CircuitProject, CircuitProjectError, LocatedName, LookupLocation, ProjectSource, SourceSnapshot,
         normalize_path, parse_circuit_project_recording_indexes,
         parse_circuit_project_with_cached_indexes,
     },
@@ -443,11 +443,24 @@ impl<'a> SourceSet<'a> {
             .sources
             .iter()
             .find(|loaded| loaded.revision == source.revision && from_file(source, &loaded.id))?;
-        let text = source.text();
-        let lines = LineIndex::new(text);
-        let range = wire_range(&lines, text.as_bytes(), &position.span, encoding)?;
-        Some(Location::new(target.uri.clone(), range))
+        source_location(&target.uri, source.text(), &position.span, encoding)
     }
+
+    /// 保存した仮想ファイル ID とバイト範囲を、現在の本文と URI で変換する。
+    pub(super) fn cached_location(
+        &self, position: &LookupLocation, encoding: PositionEncoding,
+    ) -> Option<Location> {
+        // 設定から集めた ID は、正規化されてからスラッシュでつながれている。
+        let target = self.sources.iter().find(|loaded|
+            loaded.id.split('/').map(str::as_bytes).eq(position.file.iter().map(Vec::as_slice)))?;
+        source_location(&target.uri, &target.text, &position.span, encoding)
+    }
+}
+
+fn source_location(uri: &Uri, text: &str, span: &std::ops::Range<usize>, encoding: PositionEncoding) -> Option<Location> {
+    let lines = LineIndex::new(text);
+    let range = wire_range(&lines, text.as_bytes(), span, encoding)?;
+    Some(Location::new(uri.clone(), range))
 }
 
 type OpenSources<'a> = BTreeMap<PathBuf, Option<OpenDocument<'a>>>;

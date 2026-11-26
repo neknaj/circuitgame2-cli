@@ -756,6 +756,97 @@ fn configured_reference_diagnostics_follow_edits_and_closed_dependencies() {
     assert_eq!(private["relatedInformation"][0]["location"]["range"]["start"]["line"], 1);
 }
 
+#[test]
+fn cached_absolute_diagnostics_match_fresh_positions_after_equal_byte_edits() {
+    let directory = tempfile::tempdir().unwrap();
+    let main = directory.path().join("main.ncg2");
+    let library = directory.path().join("lib/defs.ncg2");
+    std::fs::create_dir(library.parent().unwrap()).unwrap();
+    std::fs::write(
+        directory.path().join("circuitgame2.toml"),
+        "sources = [\"lib/defs.ncg2\", \"main.ncg2\"]",
+    )
+    .unwrap();
+    let library_text = "(using nor) (namespace lib (export Pair) (func hidden (in x) (out x)) (struct Pair (width 1)))";
+    let main_text = "(func run (in x) (out q) (def q (::lib::hidden x)) (def r (::lib::Pair x)) (def s (missing x)))";
+    let library_edit = library_text.replacen(") (namespace", ")\n(namespace", 1);
+    let main_edit = main_text.replacen(") (def q", ")\n(def q", 1);
+    std::fs::write(&main, main_text).unwrap();
+    std::fs::write(&library, library_text).unwrap();
+    let main = Url::from_file_path(main).unwrap();
+    let library = Url::from_file_path(library).unwrap();
+
+    let open = |uri: &Url, version, text: &str| {
+        notification(
+            "textDocument/didOpen",
+            json!({"textDocument": {"uri": uri.as_str(), "languageId": "ncg2", "version": version, "text": text}}),
+        )
+    };
+    let change = |uri: &Url, version, text: &str| {
+        notification(
+            "textDocument/didChange",
+            json!({"textDocument": {"uri": uri.as_str(), "version": version}, "contentChanges": [{"text": text}]}),
+        )
+    };
+    let diagnostics = |messages: Vec<Value>| -> Vec<Value> {
+        messages
+            .into_iter()
+            .filter(|message| message["method"] == "textDocument/publishDiagnostics")
+            .map(|message| message["params"].clone())
+            .filter(|params| {
+                params["uri"] == main.as_str()
+                    && params["diagnostics"]
+                        .as_array()
+                        .is_some_and(|items| !items.is_empty())
+            })
+            .collect()
+    };
+
+    let edited = diagnostics(exchange([
+        request(1, "initialize", json!({"capabilities": {}})),
+        notification("initialized", json!({})),
+        open(&library, 1, library_text),
+        open(&main, 1, main_text),
+        change(&library, 2, &library_edit),
+        change(&main, 2, &main_edit),
+        request(2, "shutdown", Value::Null),
+        notification("exit", Value::Null),
+    ]));
+    std::fs::write(library.to_file_path().unwrap(), &library_edit).unwrap();
+    let fresh = diagnostics(exchange([
+        request(1, "initialize", json!({"capabilities": {}})),
+        notification("initialized", json!({})),
+        open(&main, 2, &main_edit),
+        request(2, "shutdown", Value::Null),
+        notification("exit", Value::Null),
+    ]));
+    assert_eq!(edited.len(), 3, "{edited:?}");
+    assert_eq!(&edited[2..], fresh.as_slice());
+    assert_eq!(edited[0]["version"], 1);
+    assert_eq!(edited[1]["version"], 1);
+    assert_eq!(edited[2]["version"], 2);
+    let last = edited[2]["diagnostics"].as_array().unwrap();
+    assert_eq!(
+        last.iter()
+            .map(|item| item["code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "PrivateReference",
+            "WrongDeclarationKind",
+            "MissingReference"
+        ]
+    );
+    assert_eq!(last[0]["range"]["start"]["line"], 1);
+    assert_eq!(
+        last[0]["relatedInformation"][0]["location"]["uri"],
+        library.as_str()
+    );
+    assert_eq!(
+        last[0]["relatedInformation"][0]["location"]["range"]["start"]["line"],
+        1
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn alternate_windows_project_paths_do_not_choose_a_conflicting_overlay() {
