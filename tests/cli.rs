@@ -543,6 +543,108 @@ fn mixed_check_validates_expanded_func_and_reports_original_source_ranges() {
 }
 
 #[test]
+fn mixed_eval_uses_the_checked_expansion_and_the_existing_port_order() {
+    let folder = tempfile::tempdir().unwrap();
+    let dir = folder.path();
+    let settings = dir.join("circuitgame2.toml");
+    let circuit = dir.join("main.ncg2");
+    let macros = dir.join("macros.ncg2m");
+    fs::write(&settings, "sources = [\"main.ncg2\", \"macros.ncg2m\"]\n").unwrap();
+    let template = "; 定義 🐈\n(defmacro invert (out source)
+        (list (syntax (def tmp (unsyntax source)))
+              (syntax (def (unsyntax out) (nor tmp 0))))) (export invert)";
+    fs::write(&macros, template).unwrap();
+    let evaluate = |name, input| {
+        cli(&[
+            "eval",
+            "--func",
+            name,
+            "--input",
+            input,
+            "--project",
+            settings.to_str().unwrap(),
+        ])
+    };
+    let source = "; 回路 🐈\n(using nor)
+        (namespace logic
+          (func direct (in x) (out x))
+          (func twice (in (word (bits 3)) a) (out (relay (bits 3)) y inv)
+            (def relay word)
+            (def input a)
+            (expand ::invert inv input)
+            (expand ::invert y inv)))";
+    fs::write(&circuit, source).unwrap();
+
+    for (input, expected) in [("1011", "10110\n"), ("0110", "01101\n")] {
+        let result = evaluate("::logic::twice", input);
+        assert!(result.status.success(), "{result:?}");
+        assert_eq!(result.stdout, expected.as_bytes());
+        assert!(result.stderr.is_empty(), "{result:?}");
+    }
+    let result = evaluate("::logic::direct", "0");
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(result.stdout, b"0\n");
+
+    let result = evaluate("::logic::twice", "000");
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty(), "{result:?}");
+    assert!(
+        String::from_utf8(result.stderr)
+            .unwrap()
+            .contains("4 ビット必要")
+    );
+
+    let invalid_call = "(expand ::invert y word)";
+    let failing = source.replace("(expand ::invert y inv)", invalid_call);
+    fs::write(&circuit, &failing).unwrap();
+    let result = evaluate("::logic::twice", "1011");
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert!(result.stdout.is_empty(), "{result:?}");
+    let message = String::from_utf8(result.stderr).unwrap();
+    let called_at = failing.find(invalid_call).unwrap();
+    let cause_at = template.find("nor tmp").unwrap() + "nor ".len();
+    assert!(
+        message.contains(&format!(
+            "main.ncg2 [{called_at}..{}]",
+            called_at + invalid_call.len()
+        )),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!(
+            "macros.ncg2m [{cause_at}..{}]",
+            cause_at + "tmp".len()
+        )),
+        "{message}"
+    );
+
+    fs::write(&circuit, source).unwrap();
+    fs::write(
+        &macros,
+        format!("{template} (defmacro unchecked () (quote value))"),
+    )
+    .unwrap();
+    let result = evaluate("::logic::twice", "1011");
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert!(result.stdout.is_empty(), "{result:?}");
+    assert!(
+        String::from_utf8(result.stderr)
+            .unwrap()
+            .contains("マクロ本体")
+    );
+
+    fs::write(&macros, template).unwrap();
+    let result = evaluate("::invert", "0");
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert!(result.stdout.is_empty(), "{result:?}");
+    assert!(
+        String::from_utf8(result.stderr)
+            .unwrap()
+            .contains("func を指す必要")
+    );
+}
+
+#[test]
 fn mixed_check_reports_wiring_and_output_count_with_related_ranges() {
     let folder = tempfile::tempdir().unwrap();
     let dir = folder.path();
