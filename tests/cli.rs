@@ -449,6 +449,100 @@ fn mixed_check_reports_call_errors_with_original_cross_file_ranges() {
 }
 
 #[test]
+fn mixed_check_validates_expanded_func_and_reports_original_source_ranges() {
+    let folder = tempfile::tempdir().unwrap();
+    let dir = folder.path();
+    let settings = dir.join("circuitgame2.toml");
+    let circuit = dir.join("main.ncg2");
+    let macros = dir.join("macros.ncg2m");
+    fs::write(&settings, "sources = [\"main.ncg2\", \"macros.ncg2m\"]\n").unwrap();
+    let template = "; 定義 🐈\n(defmacro invert (out source)
+        (list (syntax (def tmp (unsyntax source)))
+              (syntax (def (unsyntax out) (nor tmp 0)))))";
+    fs::write(&macros, template).unwrap();
+    let command = ["check", "--project", settings.to_str().unwrap()];
+    let check_json = || {
+        let result = cli(&[
+            "check",
+            "--format",
+            "json",
+            "--project",
+            settings.to_str().unwrap(),
+        ]);
+        assert!(result.stderr.is_empty(), "{result:?}");
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        (result.status.code(), report)
+    };
+
+    let passing = "; 回路 🐈\n(using nor)
+        (func twice (in a) (out y)
+          (def input a)
+          (expand invert once input)
+          (expand invert y once))";
+    fs::write(&circuit, format!("{passing} (func plain (in x) (out x))")).unwrap();
+    let (status, report) = check_json();
+    assert_eq!(status, Some(0), "{report}");
+    assert_eq!(report["files"], 2);
+    assert_eq!(report["diagnostics"], serde_json::json!([]));
+
+    let call = "(expand invert y wide)";
+    let failing = format!(
+        "; 回路 🐈\n(using nor) (func fail (in a (wide (bits 2))) (out y)
+        (def input a) (expand invert once input) {call})"
+    );
+    fs::write(&circuit, &failing).unwrap();
+    let (status, report) = check_json();
+    assert_eq!(status, Some(1), "{report}");
+    let error = &report["diagnostics"][0];
+    let called_at = failing.find(call).unwrap();
+    let cause_at = template.find("nor tmp").unwrap() + "nor ".len();
+    assert_eq!(error["code"], "call_argument");
+    assert_eq!(
+        error["location"],
+        serde_json::json!({"path":"main.ncg2","range":{
+            "start": called_at, "end": called_at + call.len(),
+        }})
+    );
+    assert_eq!(
+        error["related"],
+        serde_json::json!([{"path": "macros.ncg2m","range":{
+            "start": cause_at, "end": cause_at + "tmp".len(),
+        }}])
+    );
+    let result = cli(&command);
+    assert_eq!(result.status.code(), Some(1));
+    let error = String::from_utf8(result.stderr).unwrap();
+    assert!(error.contains("main.ncg2"), "{error}");
+    assert!(error.contains("macros.ncg2m"), "{error}");
+    assert!(error.contains("2 ビット"), "{error}");
+
+    fs::write(&circuit, passing).unwrap();
+    fs::write(
+        &macros,
+        format!("{template} (defmacro unchecked () (quote value))"),
+    )
+    .unwrap();
+    let (status, report) = check_json();
+    assert_eq!(status, Some(1), "{report}");
+    assert_eq!(report["diagnostics"][0]["code"], "unsupported_macro_body");
+
+    fs::write(&macros, template).unwrap();
+    fs::write(
+        &circuit,
+        format!(
+            "{passing} (func other (in x) (out y) (def y (plain x))) (func plain (in x) (out x))"
+        ),
+    )
+    .unwrap();
+    let (status, report) = check_json();
+    assert_eq!(status, Some(1), "{report}");
+    assert_eq!(
+        report["diagnostics"][0]["code"],
+        "unsupported_mixed_circuit_check"
+    );
+}
+
+#[test]
 fn mixed_check_reports_wiring_and_output_count_with_related_ranges() {
     let folder = tempfile::tempdir().unwrap();
     let dir = folder.path();
@@ -493,7 +587,7 @@ fn mixed_check_reports_wiring_and_output_count_with_related_ranges() {
     let expansion = "(expand make)";
     let waiting = format!("(using nor) (func waiting (in) (out z) {expansion})");
     let error = check(&waiting);
-    assert_eq!(error["code"], "unsupported_mixed_circuit_check");
+    assert_eq!(error["code"], "missing_reference");
     assert_eq!(
         error["location"],
         location(
