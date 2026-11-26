@@ -40,6 +40,7 @@ struct Source<'a> {
     analysis: Option<&'a CachedCircuitRecovery>,
 }
 
+#[derive(PartialEq, Eq)]
 enum SourceOrigin {
     Editor(Option<PathBuf>),
     Disk(PathBuf),
@@ -49,6 +50,17 @@ enum SourceOrigin {
 pub(super) struct SourceSet<'a> {
     sources: Vec<Source<'a>>,
     project: Option<ProjectKey>,
+}
+
+/// 名前診断の位置と版を決めた、解析時のソース入力。
+pub(super) struct ReferenceInputs(Vec<ReferenceSource>);
+
+struct ReferenceSource {
+    id: String,
+    uri: Uri,
+    text: String,
+    revision: u64,
+    origin: SourceOrigin,
 }
 
 // 設定の切り替えを繰り返しても、閉じた本文と索引の保持が増え続けないようにする。
@@ -334,6 +346,42 @@ impl<'a> SourceSet<'a> {
                 SourceOrigin::Editor(_) => source.analysis,
             })
             .collect()
+    }
+
+    /// 同じ設定に属するソースの順序、出典、版、本文が保存時と一致するかを調べる。
+    pub(super) fn matches_reference_inputs(&self, inputs: &ReferenceInputs) -> bool {
+        self.sources.len() == inputs.0.len()
+            && self.sources.iter().zip(&inputs.0).all(|(source, saved)| {
+                source.id == saved.id
+                    && source.uri == saved.uri
+                    && source.revision == saved.revision
+                    && source.origin == saved.origin
+                    && source.text == saved.text
+            })
+    }
+
+    /// 照合用に保持する本文の合計バイト数を返す。
+    pub(super) fn reference_input_bytes(&self) -> usize {
+        self.sources.iter().fold(0_usize, |bytes, source| {
+            bytes.saturating_add(source.text.len())
+        })
+    }
+
+    /// 解析と公開時の照合を終えた設定付きソースから、再利用に必要な入力を保存する。
+    pub(super) fn into_reference_inputs(self) -> Option<(ProjectKey, ReferenceInputs)> {
+        let key = self.project?;
+        let inputs = self
+            .sources
+            .into_iter()
+            .map(|source| ReferenceSource {
+                id: source.id,
+                uri: source.uri,
+                revision: source.revision,
+                origin: source.origin,
+                text: source.text.into_owned(),
+            })
+            .collect();
+        Some((key, ReferenceInputs(inputs)))
     }
 
     /// 応答を公開する直前に、設定の選択とディスクから読んだ本文を照合する。
@@ -773,11 +821,19 @@ mod tests {
         };
         let (_, loaded) = SourceSet::load(open, [open].into_iter()).unwrap();
         let members = [(&uri, "main.ncg2")];
+        let (_, saved) = SourceSet::load(open, [open].into_iter()).unwrap();
+        let (_, inputs) = saved.into_reference_inputs().unwrap();
+        assert!(loaded.matches_reference_inputs(&inputs));
         assert!(loaded.still_current(members));
         assert!(!loaded.still_current([(&uri, "basis.ncg2")]));
+        let newer = OpenDocument { version: 2, ..open };
+        let (_, edited) = SourceSet::load(newer, [newer].into_iter()).unwrap();
+        assert!(!edited.matches_reference_inputs(&inputs));
         fs::write(&source, "開いている間に変わったディスクの本文").unwrap();
         assert!(loaded.still_current(members));
         fs::write(&basis, "(using xor)").unwrap();
+        let (_, edited) = SourceSet::load(open, [open].into_iter()).unwrap();
+        assert!(!edited.matches_reference_inputs(&inputs));
         assert!(!loaded.still_current(members));
         fs::write(&basis, "(using nor)").unwrap();
         assert!(loaded.still_current(members));

@@ -687,6 +687,75 @@ fn name_diagnostics_follow_the_configured_dependency_snapshot() {
     assert!(basis_syntax < cleared, "{responses:?}");
 }
 
+#[test]
+fn configured_reference_diagnostics_follow_edits_and_closed_dependencies() {
+    let target = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let basis = target.path().join("basis.ncg2");
+    let main = target.path().join("main.ncg2");
+    let unrelated = other.path().join("main.ncg2");
+    let using = "(using nor)";
+    let hidden = "(namespace lib (func hidden (in x) (out y) (def y (nor x x))))";
+    let basis_text = format!("{using}\n{hidden}");
+    let exported = basis_text.replace("(namespace lib ", "(namespace lib (export hidden) ");
+    let main_text =
+        "(func entry (in x) (out y) (def y (::lib::hidden x)) (def z (missing x)))";
+    std::fs::write(target.path().join("circuitgame2.toml"), "sources = [\"basis.ncg2\", \"main.ncg2\"]").unwrap();
+    std::fs::write(other.path().join("circuitgame2.toml"), "sources = [\"main.ncg2\"]").unwrap();
+    std::fs::write(&basis, &basis_text).unwrap();
+    std::fs::write(&main, main_text).unwrap();
+    std::fs::write(&unrelated, using).unwrap();
+    let basis = Url::from_file_path(basis).unwrap();
+    let main = Url::from_file_path(main).unwrap();
+    let unrelated = Url::from_file_path(unrelated).unwrap();
+    let open = |uri: &Url, text: &str| {
+        notification(
+            "textDocument/didOpen",
+            json!({"textDocument": {"uri": uri.as_str(), "languageId": "ncg2", "version": 1, "text": text}}),
+        )
+    };
+    let change = |uri: &Url, version, text: &str| {
+        notification(
+            "textDocument/didChange",
+            json!({"textDocument": {"uri": uri.as_str(), "version": version}, "contentChanges": [{"text": text}]}),
+        )
+    };
+    let responses = exchange([
+        request(1, "initialize", json!({"capabilities": {}})),
+        notification("initialized", json!({})),
+        open(&main, main_text),
+        open(&unrelated, using),
+        change(&unrelated, 2, "(using nor) ; 編集"),
+        open(&basis, &exported),
+        change(&main, 2, &format!("; 🦊\n{main_text}")),
+        change(&main, 1, "(using nor"),
+        notification("textDocument/didClose", json!({"textDocument": {"uri": basis.as_str()}})),
+        request(2, "shutdown", Value::Null),
+        notification("exit", Value::Null),
+    ]);
+    let updates: Vec<_> = responses.iter().filter_map(|message| {
+        let params = &message["params"];
+        (params["uri"] == main.as_str()).then_some(params)
+    }).collect();
+    assert!(updates.windows(2).all(|window| window[0]["version"].as_i64() <= window[1]["version"].as_i64()));
+    let semantic: Vec<_> = updates.into_iter().filter(|params| {
+        params["diagnostics"].as_array().is_some_and(|items| !items.is_empty())
+    }).collect();
+    assert_eq!(semantic.len(), 4, "{responses:?}");
+    assert_eq!(semantic[0]["version"], 1);
+    assert_eq!(semantic[0]["diagnostics"][0]["code"], "PrivateReference");
+    assert_eq!(semantic[1]["version"], 1);
+    assert_eq!(semantic[1]["diagnostics"][0]["code"], "MissingReference");
+    assert_eq!(semantic[2]["version"], 2);
+    assert_eq!(semantic[2]["diagnostics"][0]["range"]["start"]["line"], 1);
+    assert_eq!(semantic[3]["version"], 2);
+    let private = &semantic[3]["diagnostics"][0];
+    assert_eq!(private["code"], "PrivateReference");
+    assert_eq!(private["range"]["start"]["line"], 1);
+    assert_eq!(private["relatedInformation"][0]["location"]["uri"], basis.as_str());
+    assert_eq!(private["relatedInformation"][0]["location"]["range"]["start"]["line"], 1);
+}
+
 #[cfg(windows)]
 #[test]
 fn alternate_windows_project_paths_do_not_choose_a_conflicting_overlay() {
