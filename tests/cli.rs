@@ -173,6 +173,44 @@ fn eval_meta_runs_fold_body_with_local_bindings_and_resumes_across_slices() {
     assert_eq!(completed.stderr, b"steps=4099\n");
 }
 #[test]
+fn eval_meta_runs_nested_fold_arithmetic_with_scoped_bindings() {
+    let filename = "examples/helpers.ncg2m";
+    let evaluate = |count: &str, initial: &str, fuel: &str| {
+        cli(&[
+            "eval-meta", "--defn", "::fold-sum", "--arg", count, "--arg", initial,
+            "--fuel", fuel, "--steps", filename,
+        ])
+    };
+
+    let short = evaluate("Nat:4", "Nat:7", "1000");
+    assert!(short.status.success(), "{short:?}");
+    assert_eq!(short.stdout, b"27\n");
+
+    let many = evaluate("Nat:2048", "Nat:7", "100000");
+    assert!(many.status.success(), "{many:?}");
+    assert_eq!(many.stdout, b"4196359\n");
+    let report = String::from_utf8(many.stderr).unwrap();
+    let steps: usize = report.trim().strip_prefix("steps=").unwrap().parse().unwrap();
+    assert!(steps > 4096);
+    let stopped = evaluate("Nat:2048", "Nat:7", &(steps - 1).to_string());
+    assert_eq!(stopped.status.code(), Some(2), "{stopped:?}");
+    assert!(stopped.stdout.is_empty());
+    let ready = evaluate("Nat:2048", "Nat:7", &steps.to_string());
+    assert!(ready.status.success(), "{ready:?}");
+    assert_eq!(ready.stdout, b"4196359\n");
+
+    let overflow = evaluate("Nat:1", "Nat:18446744073709551615", "1000");
+    assert_eq!(overflow.status.code(), Some(1), "{overflow:?}");
+    assert!(overflow.stdout.is_empty());
+    let expression = "(add acc (mul (sub (add index 2) 1) 2))";
+    let source = include_str!("../examples/helpers.ncg2m");
+    let start = source.find(expression).unwrap();
+    let message = String::from_utf8(overflow.stderr).unwrap();
+    assert!(message.contains(&format!("{filename} [{start}..{}]", start + expression.len())));
+    assert!(message.contains("`add` の計算結果は Nat の範囲外"));
+}
+
+#[test]
 fn eval_meta_reports_integer_arithmetic_at_the_original_helper() {
     let folder = tempfile::tempdir().unwrap();
     let dir = folder.path();
