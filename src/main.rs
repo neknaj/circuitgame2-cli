@@ -11,6 +11,7 @@ mod formatting;
 mod nor_count;
 mod rp_plan;
 mod settling;
+mod snapshot;
 
 use std::{
     collections::HashSet,
@@ -60,6 +61,7 @@ run と settle の --project はソースファイルの列挙や --entry と併
 eval-meta の --arg は true、false、Nat:<十進整数>、Int:<十進整数>。\n\
 eval-meta の --steps は実行した評価ステップ数を標準エラー出力に表示する。\n\
 run の既定の開始点は ::main。--input 一つにつき 1 tick 進める。\n\
+ネイティブ版の run は --save-at <tick> <保存先> で保存し、--restore <ファイル> で再開する。\n\
 入力ポートがない回路は --ticks <回数> で指定回数だけ進める。--input= でも 1 tick 進められる。\n\
 --ticks と --input は併用できない。--ticks 0 は reset 直後の出力だけを表示する。\n\
 run は reset 直後を tick 0 とし、各行に tick 番号と出力ビット列を表示する。\n\
@@ -109,6 +111,7 @@ enum Command<'a> {
         entry: &'a str,
         frames: clocked::InputFrames<'a>,
         vram: Vec<&'a str>,
+        snapshot: snapshot::Options<'a>,
         sources: SourceInput<'a>,
     },
     Settle {
@@ -172,6 +175,7 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
     let mut frames = Vec::new();
     let mut ticks = None;
     let mut vram = Vec::new();
+    let mut snapshot = snapshot::Options::default();
     let mut end_options = false;
     while let Some((option, rest)) = args.split_first() {
         match option.as_str() {
@@ -182,6 +186,8 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
                         *value != "--project"
                             && *value != "--vram"
                             && !value.starts_with("--vram=")
+                            && *value != "--save-at"
+                            && *value != "--restore"
                             && *value != "--ticks"
                             && !value.starts_with("--ticks=")
                     })
@@ -201,6 +207,8 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
                         *value != "--project"
                             && *value != "--vram"
                             && !value.starts_with("--vram=")
+                            && *value != "--save-at"
+                            && *value != "--restore"
                             && *value != "--ticks"
                             && !value.starts_with("--ticks=")
                     })
@@ -225,6 +233,29 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
                     }
                 };
                 ticks = Some(tick_count("--ticks", value)?);
+                args = rest;
+            }
+            "--save-at" => {
+                snapshot::require_native()?;
+                if snapshot.save.is_some() {
+                    return Err("--save-at は一度だけ指定できる。".into());
+                }
+                let (value, rest) = option_value("--save-at", rest)?;
+                let tick = tick_count("--save-at", value)?;
+                let (path, rest) = option_value("--save-at の保存先", rest)?;
+                snapshot.save = Some(snapshot::Save {
+                    tick,
+                    path: Path::new(path),
+                });
+                args = rest;
+            }
+            "--restore" => {
+                snapshot::require_native()?;
+                if snapshot.restore.is_some() {
+                    return Err("--restore は一度だけ指定できる。".into());
+                }
+                let (path, rest) = option_value("--restore", rest)?;
+                snapshot.restore = Some(Path::new(path));
                 args = rest;
             }
             "--vram" => {
@@ -260,6 +291,7 @@ fn run_command(mut args: &[String]) -> Result<Command<'_>, String> {
         entry: entry.unwrap_or("::main"),
         frames,
         vram,
+        snapshot,
         sources,
     })
 }
@@ -883,7 +915,13 @@ fn execute(
                 _ => error,
             }
         })?;
-    if let Command::Run { frames, vram, .. } = command {
+    if let Command::Run {
+        frames,
+        vram,
+        snapshot,
+        ..
+    } = command
+    {
         return clocked::trace(
             &project,
             aliases,
@@ -892,6 +930,7 @@ fn execute(
                 name,
                 frames,
                 vram: &vram,
+                snapshot,
                 settings: settings.as_ref().map(|(path, settings)| (*path, settings)),
                 limits,
             },

@@ -208,6 +208,21 @@ ncg2 run --project examples/vram/circuitgame2.toml --vram screen --input 1101 --
 
 `--vram` を複数指定した場合は、指定順に列を追加する。公開名が `-` で始まる場合は `--vram=-screen` の形で指定する。`run --project` は `--vram` を省いた場合も、設定された読み出し信号を検査する。
 
+## 実行を保存して再開する
+
+ネイティブ版の `run` では `--save-at <tick> <ファイル>` で指定した tick の状態を、更新が確定した時点で保存できる。`--restore <ファイル>` を指定すると、保存した tick の出力を最初に表示し、続けて渡した入力から実行を再開する。
+
+```sh
+ncg2 run --project examples/vram/circuitgame2.toml --vram screen --input 1101 --save-at 1 state.bin
+ncg2 run --project examples/vram/circuitgame2.toml --vram screen --restore state.bin --input 1000
+```
+
+復元には保存時の回路と設定を使う。`tick-ns` を指定した場合は保存時と同じ分子と分母を使う。保存先と復元元の相対パスは、コマンドを実行するディレクトリを基準に指定する。
+
+保存する tick は、実行開始の tick から指定した入力をすべて適用した tick までの範囲で指定できる。入力のない回路を復元するときは、`--ticks` に再開してから進める tick 数を指定する。外部デバイスを使う実行と WASI 版では保存・復元を使えない。
+
+復元ファイルや入力列の検査に失敗した場合は、実行結果を表示しない。保存の書き込みに失敗した場合は以前の保存ファイルを保持する。
+
 ## RP 向けの配線表を作る
 
 ```sh
