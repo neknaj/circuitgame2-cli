@@ -25,7 +25,7 @@ use circuitgame2_cli::config;
 use circuitgame2_core::{
     ncg2m::call_evaluation::scalar::ScalarValue,
     project::{
-        CircuitProject, DefinitionAnalysisError, ModuleBodyPosition, NameKey,
+        CircuitProject, DefinitionAnalysisError, LoweredBitFunc, ModuleBodyPosition, NameKey,
         PreparedDefinitionError, SourceKind, SourceSnapshot, UseAliases, UseTargets,
         normalize_path, parse_circuit_project, prepare_definition_analysis,
     },
@@ -65,7 +65,8 @@ run の既定の開始点は ::main。--input 一つにつき 1 tick 進める�
 run は reset 直後を tick 0 とし、各行に tick 番号と出力ビット列を表示する。\n\
 --vram を指定すると、指定順に各 VRAM の記憶部を追加する。\n\
 settle は固定入力での定常化を解析する。ネイティブ版では未推定・未証明の終了コードは 2。\n\
-check は .ncg2 の回路または .ncg2m の補助関数を静的に検査する。\n\
+check は .ncg2 の回路と .ncg2m の補助関数・展開を静的に検査する。\n\
+eval は対応範囲のマクロを展開した組み合わせ関数も評価する。\n\
 nor-count は展開後の NOR ゲート数を完全修飾名ごとに表示する。\n\
 fmt は整形結果を標準出力に表示する。--check は整形が必要な場合に終了コード 1 を返す。\n\
 ネイティブ版の fmt --write は構文検査と整形が成功した場合にファイルを置き換える。\n\
@@ -470,7 +471,7 @@ fn command(args: &[String]) -> Result<Command<'_>, String> {
 fn source_path(
     path: &str,
     from_config: bool,
-    check_ncg2m: bool,
+    allow_meta: bool,
 ) -> Result<(String, SourceKind), String> {
     if !from_config
         && Path::new(path)
@@ -490,13 +491,13 @@ fn source_path(
         .map_err(|error| format!("{path} のパスを正規化できない ({error:?})。"))?;
     let kind = match id.source_kind() {
         Some(kind @ SourceKind::Circuit) => kind,
-        Some(kind @ SourceKind::Functional) if check_ncg2m => kind,
+        Some(kind @ SourceKind::Functional) if allow_meta => kind,
         Some(SourceKind::Functional) if from_config => {
             return Err(format!(
                 "{path} は NCG2M のソース。この CLI は NCG2M の実行に未対応。"
             ));
         }
-        _ if from_config || check_ncg2m => {
+        _ if from_config || allow_meta => {
             return Err(format!(
                 "{path} の拡張子には .ncg2 または .ncg2m を指定する。"
             ));
@@ -538,6 +539,23 @@ fn read_source(
     Ok(())
 }
 
+fn declaration_key<'a>(name: &'a str, label: &str) -> Result<NameKey<'a>, String> {
+    let qualified = name
+        .strip_prefix("::")
+        .filter(|path| {
+            path.split("::")
+                .all(|part| !part.is_empty() && !part.contains(':'))
+        })
+        .ok_or_else(|| format!("{label}は :: から始まる完全修飾名で指定する。"))?;
+    let (parent, name_part) = qualified
+        .rsplit_once("::")
+        .map_or((None, qualified), |(parent, tail)| (Some(parent), tail));
+    Ok(NameKey {
+        parent,
+        name: name_part,
+    })
+}
+
 fn declaration_position(
     project: &CircuitProject<'_>,
     targets: &UseTargets<'_, '_>,
@@ -549,20 +567,7 @@ fn declaration_position(
     } else {
         ("モジュール名", "module")
     };
-    let qualified = name
-        .strip_prefix("::")
-        .filter(|path| {
-            path.split("::")
-                .all(|part| !part.is_empty() && !part.contains(':'))
-        })
-        .ok_or_else(|| format!("{label}は :: から始まる完全修飾名で指定する。"))?;
-    let (parent, name_part) = qualified
-        .rsplit_once("::")
-        .map_or((None, qualified), |(parent, tail)| (Some(parent), tail));
-    let key = NameKey {
-        parent,
-        name: name_part,
-    };
+    let key = declaration_key(name, label)?;
     let (source, named_form) = targets
         .exports()
         .declarations()
@@ -639,7 +644,10 @@ fn execute(
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
     let check_ncg2m = matches!(command, Command::Check { .. });
-    let allow_meta = check_ncg2m || matches!(command, Command::EvalMeta { .. });
+    let allow_meta = matches!(
+        command,
+        Command::Check { .. } | Command::Eval { .. } | Command::EvalMeta { .. }
+    );
     let settings = match input {
         SourceInput::Files(files) => {
             for path in files {
@@ -717,24 +725,39 @@ fn execute(
             source_diagnostic,
         );
     }
-    if check_ncg2m
-        && sources
-            .iter()
-            .any(|(_, _, kind)| *kind == SourceKind::Functional)
+    if sources
+        .iter()
+        .any(|(_, _, kind)| *kind == SourceKind::Functional)
     {
-        let files = check_ncg2m::check(&snapshots, &mut report, &source_diagnostic)?;
-        if let Some((path, settings)) = &settings
-            && let Some(device) = settings.device.first()
-        {
-            let reason = "外部デバイスを検査するには、回路で開始モジュールを定義する必要がある。";
-            if let Some(report) = &mut report {
-                report.settings_error("device_requires_circuit", path, Some(device.span()));
+        if check_ncg2m {
+            let files = check_ncg2m::check(&snapshots, &mut report, &source_diagnostic)?;
+            if let Some((path, settings)) = &settings
+                && let Some(device) = settings.device.first()
+            {
+                let reason =
+                    "外部デバイスを検査するには、回路で開始モジュールを定義する必要がある。";
+                if let Some(report) = &mut report {
+                    report.settings_error("device_requires_circuit", path, Some(device.span()));
+                }
+                return Err(config::at(path, Some(device.span()), reason));
             }
-            return Err(config::at(path, Some(device.span()), reason));
+            return writeln!(stdout, "NCG2M の静的検査成功（{files} ファイル）")
+                .map_err(output_error)
+                .map(|()| ExitCode::SUCCESS);
         }
-        return writeln!(stdout, "NCG2M の静的検査成功（{files} ファイル）")
-            .map_err(output_error)
-            .map(|()| ExitCode::SUCCESS);
+        if let Command::Eval { name, input, .. } = command {
+            let function = check_ncg2m::lower_selected_func(&snapshots, name, &source_diagnostic)?;
+            if let Some((path, settings)) = &settings
+                && let Some(device) = settings.device.first()
+            {
+                return Err(config::at(
+                    path,
+                    Some(device.span()),
+                    "外部デバイスを使う混在プロジェクトの回路実行には対応していない。",
+                ));
+            }
+            return evaluate_function(&function, name, input, stdout);
+        }
     }
     let project = parse_circuit_project(&snapshots).map_err(|error| {
         if let Some(report) = &mut report {
@@ -898,6 +921,15 @@ fn execute(
         .get(file, entry)
         .ok_or_else(|| format!("{name} の展開結果が見つからない。"))?;
 
+    evaluate_function(function, name, input, stdout)
+}
+
+fn evaluate_function(
+    function: &LoweredBitFunc,
+    name: &str,
+    input: &str,
+    stdout: &mut impl Write,
+) -> Result<ExitCode, String> {
     let width = function.inputs().total_bits();
     if input.len() != width {
         return Err(format!(

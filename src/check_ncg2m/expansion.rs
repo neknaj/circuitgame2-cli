@@ -8,9 +8,11 @@ use circuitgame2_core::{
         expression_types::{DeferredExpression, ExpressionCheckFailure, MacroBodyError},
         template::TemplateError,
     },
+    netlist::PortBitLayoutError,
     project::{
-        DefinitionAnalysisError, DefmacroNameError, ExpandedFuncWiringError, GeneratedWiringError,
-        LocatedName, MacroCallError, MacroPreparationError, MacroPreparationFailure, ProjectSource,
+        BitFuncLowerError, CheckedBitFunc, DefinitionAnalysisError, DefmacroNameError,
+        ExpandedFuncWiringError, GeneratedWiringError, LocatedName, MacroCallError,
+        MacroPreparationError, MacroPreparationFailure, ProjectSource,
     },
     syntax::circuit::GeneratedDefinitionError,
 };
@@ -356,5 +358,42 @@ pub(super) fn body<'p, 'a>(
         &reason,
         related.map(|(label, range)| (label, site(source, range))),
         expand,
+    )
+}
+
+/// 幅の違反を発生させたポート、または定義を含む関数の位置を表示する。
+pub(super) fn layout_error(
+    function: &CheckedBitFunc<'_, '_>,
+    declaration: &LocatedName<'_, '_>,
+    error: BitFuncLowerError,
+) -> String {
+    let (label, ports, error) = match error {
+        BitFuncLowerError::Input(error) => {
+            ("入力ポート", function.signature().inputs.as_slice(), error)
+        }
+        BitFuncLowerError::Definition(error) => ("定義", &[][..], error),
+        BitFuncLowerError::Output(error) => {
+            ("出力ポート", function.signature().outputs.as_slice(), error)
+        }
+    };
+    let (index, reason) = match error {
+        PortBitLayoutError::ZeroWidth { port } => (port, "幅には正の整数が必要。".into()),
+        PortBitLayoutError::CapacityExceeded {
+            port,
+            width,
+            used,
+            capacity,
+        } => (
+            port,
+            format!("{used} ビットに {width} ビットを加えると、上限 {capacity} ビットを超える。"),
+        ),
+    };
+    let at = ports
+        .get(index)
+        .map_or(declaration, |port| &port.annotation);
+    format!(
+        "{} {}番目の{label}。{reason}",
+        diagnostic::located(at),
+        index + 1
     )
 }

@@ -5,16 +5,19 @@ use std::{num::NonZeroUsize, ops::Range};
 use circuitgame2_core::{
     ncg2m::file::MetaItemKind,
     project::{
-        AliasConflict, AliasDisposition, DefinitionAnalysisError, FuncWiringResult, LocatedName,
-        MixedAbsoluteTarget, MixedUseAliasConflict, MixedUseAliases, MixedUseTargets,
-        ParsedProjectSources, ProjectDeclaration, ProjectDeclarationKind, ProjectSource,
-        ProjectSourceIndex, ResolvedDefmacro, SourceSnapshot, UseSite, check_mixed_use_aliases,
-        index_mixed_use_targets, parse_project_sources, validate_mixed_circuit_basis,
+        AliasConflict, AliasDisposition, CheckedBitFunc, DefinitionAnalysisError, FuncWiringResult,
+        LocatedName, LoweredBitFunc, MixedAbsoluteTarget, MixedUseAliasConflict, MixedUseAliases,
+        MixedUseTargets, ParsedProjectSources, ProjectDeclaration, ProjectDeclarationKind,
+        ProjectSource, ProjectSourceIndex, ResolvedDefmacro, SourceSnapshot, UseSite,
+        check_mixed_use_aliases, index_mixed_use_targets, parse_project_sources,
+        validate_mixed_circuit_basis,
     },
     syntax::circuit::Head,
 };
 
-use super::{WIDTH_LIMIT, check_report::Report, diagnostic};
+use super::{
+    BIT_LIMIT, GATE_LIMIT, WIDTH_LIMIT, check_report::Report, declaration_key, diagnostic,
+};
 
 mod errors;
 mod evaluate;
@@ -34,33 +37,107 @@ pub(super) fn check(
     let project = parse_sources(snapshots, report, &contextualize)?;
     let targets = resolve_targets(&project, report, &contextualize)?;
     let aliases = resolve_aliases(&targets, report, &contextualize)?;
+    check_bodies(&project, &aliases, None, report).map_err(&contextualize)?;
+    Ok(project.sources().len())
+}
+
+/// 指定された関数を含む混在プロジェクトを検査し、入力と出力の配置を持つ NOR 回路に変換する。
+///
+/// 通常の検査で残った未対応の回路フォームやマクロ本体があれば診断を返す。
+/// 名前はルートを表す `::` から始め、型幅、配線と NOR の個数には通常の `eval` と同じ上限を使う。
+pub(super) fn lower_selected_func(
+    snapshots: &[SourceSnapshot<'_>],
+    name: &str,
+    contextualize: &impl Fn(String) -> String,
+) -> Result<LoweredBitFunc, String> {
+    let mut report = None;
+    let project = parse_sources(snapshots, &mut report, contextualize)?;
+    let targets = resolve_targets(&project, &mut report, contextualize)?;
+    let aliases = resolve_aliases(&targets, &mut report, contextualize)?;
+    let key = declaration_key(name, "関数名")?;
+    let declaration = targets
+        .exports()
+        .declarations()
+        .declaration(key)
+        .ok_or_else(|| contextualize(format!("{name} の宣言が見つからない。")))?;
+    if declaration.kind != ProjectDeclarationKind::Circuit(Head::Func) {
+        return Err(contextualize(format!(
+            "{} {name} は func を指す必要がある。",
+            diagnostic::located(&declaration.name),
+        )));
+    }
+    let file = declaration.file;
+    let entry = selected_function_entry(&project, &declaration)
+        .ok_or_else(|| contextualize(format!("{name} の宣言位置が見つからない。")))?;
+    let selected = check_bodies(&project, &aliases, Some((file, entry)), &mut report)
+        .map_err(contextualize)?
+        .ok_or_else(|| contextualize(format!("{name} の検査結果が見つからない。")))?;
+    let declaration_location = diagnostic::located(&declaration.name);
+    let lowered = selected.lower_bit_func(BIT_LIMIT).map_err(|error| {
+        contextualize(expansion::layout_error(&selected, &declaration.name, error))
+    })?;
+    let gates = lowered.netlist().gates.len();
+    if gates > GATE_LIMIT {
+        return Err(contextualize(format!(
+            "{declaration_location} NOR ゲートが {gates} 個あり、上限 {GATE_LIMIT} 個を超えている。",
+        )));
+    }
+    Ok(lowered)
+}
+
+fn selected_function_entry(
+    project: &ParsedProjectSources<'_>,
+    declaration: &ProjectDeclaration<'_, '_>,
+) -> Option<usize> {
+    let ProjectSourceIndex::Circuit(circuit) = project.indexes().get(declaration.file)? else {
+        return None;
+    };
+    let named = circuit.names.get(declaration.item)?;
+    circuit
+        .syntax
+        .entries
+        .iter()
+        .position(|entry| entry.form == named.form)
+}
+
+fn check_bodies<'p, 'a>(
+    project: &'p ParsedProjectSources<'a>,
+    aliases: &MixedUseAliases<'_, 'p, 'a>,
+    selection: Option<(usize, usize)>,
+    report: &mut Option<&mut Report<'_>>,
+) -> Result<Option<CheckedBitFunc<'p, 'a>>, String> {
     aliases
         .plan_defn_calls()
-        .map_err(|error| contextualize(errors::calls(&project, error, report)))?;
+        .map_err(|error| errors::calls(project, error, report))?;
 
-    let pending = check_circuit_functions(&project, &aliases, report).map_err(&contextualize)?;
+    let pending = check_circuit_functions(project, aliases, report)?;
+    let mut selected = None;
     let uses_expansion = !pending.expansions.is_empty();
     if uses_expansion {
         for (file, entry, call) in pending.expansions {
-            check_expanded_function(&aliases, file, entry, || call, report)
-                .map_err(&contextualize)?;
+            let function = check_expanded_function(aliases, file, entry, || call, report)?;
+            if selection == Some((file, entry)) {
+                selected = Some(function);
+            }
         }
         if let Some(argument) = pending.argument {
-            return Err(contextualize(unsupported(
+            return Err(unsupported(
                 report,
                 argument,
                 "この実引数の型は、混在プロジェクトの検査では確定できない。",
-            )));
+            ));
         }
         for (file, entry) in pending.plain {
-            check_expanded_function(
-                &aliases,
+            let function = check_expanded_function(
+                aliases,
                 file,
                 entry,
-                || function_location(&project, file, entry),
+                || function_location(project, file, entry),
                 report,
-            )
-            .map_err(&contextualize)?;
+            )?;
+            if selection == Some((file, entry)) {
+                selected = Some(function);
+            }
         }
     }
 
@@ -91,37 +168,35 @@ pub(super) fn check(
                         match project.check_defmacro_body(&definition) {
                             Some(Ok(_)) => continue,
                             Some(Err(error)) => {
-                                return Err(contextualize(expansion::body(
-                                    source, error, None, report,
-                                )));
+                                return Err(expansion::body(source, error, None, report));
                             }
                             None => {}
                         }
                     }
-                    return Err(contextualize(failure(
+                    return Err(failure(
                         report,
                         "unsupported_macro_body",
                         site(source, body.clone()),
                         "マクロ本体の検査には対応していない。",
                         [],
-                    )));
+                    ));
                 }
             }
             ProjectSourceIndex::Circuit(circuit) => {
                 if let Some(argument) = pending.argument {
-                    return Err(contextualize(unsupported(
+                    return Err(unsupported(
                         report,
                         argument,
                         "この実引数の型は、混在プロジェクトの検査では確定できない。",
-                    )));
+                    ));
                 }
                 if uses_expansion {
                     if let Some(other) = pending.other {
-                        return Err(contextualize(unsupported(
+                        return Err(unsupported(
                             report,
                             other,
                             "この回路フォームの検査は混在プロジェクトでは未対応。",
-                        )));
+                        ));
                     }
                     continue;
                 }
@@ -130,15 +205,15 @@ pub(super) fn check(
                     .iter()
                     .find(|form| matches!(form.head, Head::Func | Head::Module))
                     .map_or(0..0, |form| form.name.span.clone());
-                return Err(contextualize(unsupported(
+                return Err(unsupported(
                     report,
                     site(source, span),
                     "混在プロジェクトでは、回路本体の検査と展開に未対応の処理がある。",
-                )));
+                ));
             }
         }
     }
-    Ok(project.sources().len())
+    Ok(selected)
 }
 
 fn parse_sources<'a>(
@@ -287,9 +362,9 @@ fn check_expanded_function<'p, 'a>(
     entry: usize,
     location: impl FnOnce() -> LocatedName<'p, 'a>,
     report: &mut Option<&mut Report<'_>>,
-) -> Result<(), String> {
+) -> Result<CheckedBitFunc<'p, 'a>, String> {
     match aliases.check_expanded_bit_func(file, entry, WIDTH_LIMIT, EXPANSION_FUEL) {
-        Ok(Some(_)) => Ok(()),
+        Ok(Some(checked)) => Ok(checked),
         Ok(None) => Err(unsupported(
             report,
             location(),

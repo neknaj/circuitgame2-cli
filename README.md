@@ -56,7 +56,10 @@ ncg2 eval-meta --defn ::startup-ready examples/helpers.ncg2m
 
 ```sh
 ncg2 check design.ncg2 macros.ncg2m
+ncg2 eval --func ::twice --input 1 design.ncg2 macros.ncg2m
 ```
+
+`eval` は `design.ncg2` にある1ビット入力の関数 `::twice` を展開して評価する。入力と出力はポートの宣言順で、各ポートの最下位ビットから並べる。混在プロジェクト全体の検査が通った場合に結果を出力する。
 
 展開を含む混在プロジェクトでは同じ構文の範囲で展開を使わない関数も検査できる。未検査の回路本体やマクロの式が残ると、その位置を報告して終了コード 1 を返す。展開一件に使える評価器の遷移は100,000回まで。上限内に展開が終わらない場合も終了コード 1 を返す。混在プロジェクトのモジュールと回路テストの検査は準備中。
 
