@@ -28,7 +28,8 @@ use super::{
     diagnostic::{self, LocalRecovery},
     inlay_hint, navigation,
     sources::{
-        self, DiskSyntaxCache, OpenDocument, ProjectKey, STANDALONE_ID, SourcePaths, SourceSet,
+        self, DiskSyntaxCache, OpenDocument, ProjectKey, ReferenceInputs, STANDALONE_ID, SourcePaths,
+        SourceSet,
     },
     symbols,
 };
@@ -127,6 +128,17 @@ struct DocumentUpdate {
     syntax: Option<Message>,
 }
 
+// 閉じたプロジェクトの本文を保持せず、開いているプロジェクトの再利用にも上限を設ける。
+const MAX_REFERENCE_PROJECTS: usize = 64;
+const MAX_REFERENCE_INPUT_BYTES: usize = 4 * 1024 * 1024;
+
+struct ReferenceReport {
+    inputs: ReferenceInputs,
+    bytes: usize,
+    encoding: PositionEncoding,
+    diagnostics: Vec<(Uri, lsp_types::Diagnostic)>,
+}
+
 #[derive(Default)]
 struct Server {
     state: State,
@@ -137,6 +149,7 @@ struct Server {
     semantic_palette: Option<navigation::SemanticPalette>,
     hint_dependencies: HashMap<Uri, Vec<Uri>>,
     disk_syntax: DiskSyntaxCache,
+    reference_reports: BTreeMap<ProjectKey, ReferenceReport>,
     next_refresh_id: u64,
 }
 
@@ -652,6 +665,8 @@ impl Server {
                 }
             }
         }
+        let mut old_reports = std::mem::take(&mut self.reference_reports);
+        let mut reference_bytes = 0_usize;
         for (project, (paths, documents)) in groups {
             let open = self
                 .documents
@@ -661,18 +676,49 @@ impl Server {
                 .iter()
                 .map(|(_, doc)| (doc.uri.clone(), self.documents[doc.uri].syntax.clone()))
                 .collect();
-            // 次のプロジェクトの解析を始める前に、照合した診断を送る。
-            if let Ok(snapshot) = SourceSet::load_group(project, paths, &documents, open)
-                && let Ok((project, staged)) =
+            let previous = old_reports.remove_entry(&project);
+            // Core の再計算を省いた場合も、設定とディスクの本文を公開直前に照合する。
+            if let Ok(snapshot) = SourceSet::load_group(project, paths, &documents, open) {
+                let members = || documents.iter().map(|(id, doc)| (doc.uri, id.as_str()));
+                if let Some((key, cached)) = previous.filter(|(_, entry)| {
+                    entry.encoding == encoding && snapshot.matches_reference_inputs(&entry.inputs)
+                }) {
+                    if snapshot.still_current(members()) {
+                        merge_reference_reports(&mut reports, cached.diagnostics.iter().cloned());
+                        let bytes = reference_bytes.saturating_add(cached.bytes);
+                        if self.reference_reports.len() < MAX_REFERENCE_PROJECTS
+                            && bytes <= MAX_REFERENCE_INPUT_BYTES
+                        {
+                            self.reference_reports.insert(key, cached);
+                            reference_bytes = bytes;
+                        }
+                    }
+                } else if let Ok((project, staged)) =
                     snapshot.parse_strict_recording_disk_indexes(&self.disk_syntax)
-            {
-                let references = diagnostic::collect_references(&project, &snapshot, encoding);
-                let members = documents.iter().map(|(id, doc)| (doc.uri, id.as_str()));
-                if snapshot.still_current(members) {
-                    self.disk_syntax.extend(staged);
-                    for (uri, item) in references {
-                        if let Some(diagnostics) = reports.get_mut(&uri) {
-                            diagnostics.push(item);
+                {
+                    let references = diagnostic::collect_references(&project, &snapshot, encoding);
+                    if snapshot.still_current(members()) {
+                        self.disk_syntax.extend(staged);
+                        let bytes = snapshot.reference_input_bytes();
+                        let total = reference_bytes.saturating_add(bytes);
+                        if self.reference_reports.len() < MAX_REFERENCE_PROJECTS
+                            && total <= MAX_REFERENCE_INPUT_BYTES
+                        {
+                            merge_reference_reports(&mut reports, references.iter().cloned());
+                            if let Some((key, inputs)) = snapshot.into_reference_inputs() {
+                                self.reference_reports.insert(
+                                    key,
+                                    ReferenceReport {
+                                        inputs,
+                                        bytes,
+                                        encoding,
+                                        diagnostics: references,
+                                    },
+                                );
+                                reference_bytes = total;
+                            }
+                        } else {
+                            merge_reference_reports(&mut reports, references);
                         }
                     }
                 }
@@ -692,6 +738,17 @@ impl Server {
             self.documents.get_mut(&uri).unwrap().published = Some((version, diagnostics));
         }
         Ok(())
+    }
+}
+
+fn merge_reference_reports(
+    reports: &mut HashMap<Uri, Vec<lsp_types::Diagnostic>>,
+    references: impl IntoIterator<Item = (Uri, lsp_types::Diagnostic)>,
+) {
+    for (uri, item) in references {
+        if let Some(diagnostics) = reports.get_mut(&uri) {
+            diagnostics.push(item);
+        }
     }
 }
 
