@@ -9,8 +9,9 @@ use std::{
 use circuitgame2_core::{
     ncg2m::{
         call_evaluation::scalar::{
-            ScalarBindingError, ScalarEntryError, ScalarExecutionError, ScalarExecutionSlice,
-            ScalarValue, prepare_scalar_entry,
+            ScalarBindingError, ScalarEntryError, ScalarExecution, ScalarExecutionError,
+            ScalarExecutionSlice, ScalarFoldExecution, ScalarFoldSlice, ScalarValue,
+            prepare_scalar_entry, prepare_scalar_fold,
         },
         data_types::{DataType, DataTypeAtom},
         integers::{IntegerType, IntegerValue, read_integer_literal},
@@ -38,6 +39,39 @@ fn interruption() -> Result<impl Fn() -> bool, String> {
 #[cfg(not(any(unix, windows)))]
 fn interruption() -> Result<impl Fn() -> bool, String> {
     Ok(|| false)
+}
+
+enum Evaluation<'plan, 'p, 'a> {
+    Scalar(ScalarExecution<'plan, 'p, 'a>),
+    Fold(ScalarFoldExecution<'p, 'a>),
+}
+
+enum EvaluationStep<'plan, 'p, 'a> {
+    Suspended(Evaluation<'plan, 'p, 'a>),
+    Complete(ScalarValue),
+}
+
+impl<'plan, 'p, 'a> Evaluation<'plan, 'p, 'a> {
+    fn run_slice(self, fuel: NonZeroUsize)
+        -> (Result<EvaluationStep<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>, usize)
+    {
+        match self {
+            Self::Scalar(state) => {
+                let (result, used) = state.run_slice_with_steps(fuel);
+                (result.map(|step| match step {
+                    ScalarExecutionSlice::Suspended(next) => EvaluationStep::Suspended(Self::Scalar(next)),
+                    ScalarExecutionSlice::Complete(value) => EvaluationStep::Complete(value),
+                }), used)
+            }
+            Self::Fold(state) => {
+                let (result, used) = state.run_slice_with_steps(fuel);
+                (result.map(|step| match step {
+                    ScalarFoldSlice::Suspended(next) => EvaluationStep::Suspended(Self::Fold(next)),
+                    ScalarFoldSlice::Complete(value) => EvaluationStep::Complete(value),
+                }), used)
+            }
+        }
+    }
 }
 
 /// `--arg` 一つを評価器の値に変換する。整数の範囲検査は Core に委ねる。
@@ -129,21 +163,27 @@ pub(in super::super) fn evaluate(
         file: declaration.file,
         item: declaration.item,
     };
-    let entry = prepare_scalar_entry(&plan, position).map_err(|error| {
-        let reason = match error {
-            ScalarEntryError::UnknownDefinition => "補助関数が呼び出し計画にない。",
+    let state = match prepare_scalar_entry(&plan, position) {
+        Ok(entry) => entry.start(arguments).map(Evaluation::Scalar),
+        Err(error) => match error {
             ScalarEntryError::UnsupportedFragment => {
-                "本体または呼び出し先にスカラー評価の対象外の式や型がある。"
+                let Some(entry) = prepare_scalar_fold(&plan, position) else {
+                    return Err(contextualize(format!(
+                        "{} 本体または呼び出し先にスカラー評価の対象外の式や型がある。",
+                        diagnostic::located(&declaration.name)
+                    )));
+                };
+                entry.start(arguments).map(Evaluation::Fold)
             }
-        };
-        contextualize(format!(
-            "{} {reason}",
-            diagnostic::located(&declaration.name)
-        ))
-    })?;
-    let mut state = entry
-        .start(arguments)
-        .map_err(|error| contextualize(binding_error(error)))?;
+            ScalarEntryError::UnknownDefinition => {
+                return Err(contextualize(format!(
+                    "{} 補助関数が呼び出し計画にない。",
+                    diagnostic::located(&declaration.name)
+                )));
+            }
+        },
+    };
+    let mut state = state.map_err(|error| contextualize(binding_error(error)))?;
     let interrupted = interruption()?;
     let mut remaining = fuel;
     let mut steps = show_steps.then_some(0_u128);
@@ -151,21 +191,18 @@ pub(in super::super) fn evaluate(
         // fuel の総回数を守りながら、枠の区切りで中断要求を確認する。
         let count = remaining.map_or(SLICE, |available| available.get().min(SLICE));
         let slice = NonZeroUsize::new(count as usize).expect("1..=4096 steps fit usize");
-        let step = if let Some(total) = &mut steps {
-            let (step, used) = state.run_slice_with_steps(slice);
+        let (step, used) = state.run_slice(slice);
+        if let Some(total) = &mut steps {
             *total = total
                 .checked_add(used as u128)
                 .ok_or("評価ステップ数が表示できる範囲を超えた。")?;
-            step
-        } else {
-            state.run_slice(slice)
-        };
+        }
         if interrupted() {
             eprintln!("補助関数の評価を中断した。");
             break Ok(ExitCode::from(130));
         }
         match step {
-            Ok(ScalarExecutionSlice::Complete(value)) => {
+            Ok(EvaluationStep::Complete(value)) => {
                 let written = match value {
                     ScalarValue::Bool(value) => writeln!(stdout, "{value}"),
                     ScalarValue::Integer(IntegerValue::Nat(value)) => writeln!(stdout, "{value}"),
@@ -175,7 +212,7 @@ pub(in super::super) fn evaluate(
                     .map(|()| ExitCode::SUCCESS)
                     .map_err(super::super::output_error);
             }
-            Ok(ScalarExecutionSlice::Suspended(next)) => {
+            Ok(EvaluationStep::Suspended(next)) => {
                 if let Some(available) = remaining {
                     remaining = NonZeroU64::new(available.get() - count);
                     if remaining.is_none() {
