@@ -54,7 +54,7 @@ dependencies = [
 [[package]]
 name = "circuitgame2-core"
 version = "0.1.0"
-source = "git+https://github.com/neknaj/circuitgame2-core?rev=7bc4ad9614a5717b7221aa6902833e08245faa10#7bc4ad9614a5717b7221aa6902833e08245faa10"
+source = "git+https://github.com/neknaj/circuitgame2-core?rev=053dad3a5f93eb44a60de08959d528056e744185#053dad3a5f93eb44a60de08959d528056e744185"
 dependencies = [
  "circuitgame2-device-timing",
  "circuitgame2-packed-nor",
@@ -65,7 +65,7 @@ dependencies = [
 [[package]]
 name = "circuitgame2-device-timing"
 version = "0.1.0"
-source = "git+https://github.com/neknaj/circuitgame2-core?rev=7bc4ad9614a5717b7221aa6902833e08245faa10#7bc4ad9614a5717b7221aa6902833e08245faa10"
+source = "git+https://github.com/neknaj/circuitgame2-core?rev=053dad3a5f93eb44a60de08959d528056e744185#053dad3a5f93eb44a60de08959d528056e744185"
 dependencies = [
  "verus_builtin_macros",
  "vstd",
@@ -74,7 +74,7 @@ dependencies = [
 [[package]]
 name = "circuitgame2-packed-nor"
 version = "0.1.0"
-source = "git+https://github.com/neknaj/circuitgame2-core?rev=7bc4ad9614a5717b7221aa6902833e08245faa10#7bc4ad9614a5717b7221aa6902833e08245faa10"
+source = "git+https://github.com/neknaj/circuitgame2-core?rev=053dad3a5f93eb44a60de08959d528056e744185#053dad3a5f93eb44a60de08959d528056e744185"
 dependencies = [
  "verus_builtin_macros",
  "vstd",
@@ -83,7 +83,7 @@ dependencies = [
 [[package]]
 name = "circuitgame2-project-config"
 version = "0.1.0"
-source = "git+https://github.com/neknaj/circuitgame2-core?rev=7bc4ad9614a5717b7221aa6902833e08245faa10#7bc4ad9614a5717b7221aa6902833e08245faa10"
+source = "git+https://github.com/neknaj/circuitgame2-core?rev=053dad3a5f93eb44a60de08959d528056e744185#053dad3a5f93eb44a60de08959d528056e744185"
 dependencies = [
  "serde",
  "toml",
@@ -92,7 +92,7 @@ dependencies = [
 [[package]]
 name = "circuitgame2-syntax"
 version = "0.1.0"
-source = "git+https://github.com/neknaj/circuitgame2-core?rev=7bc4ad9614a5717b7221aa6902833e08245faa10#7bc4ad9614a5717b7221aa6902833e08245faa10"
+source = "git+https://github.com/neknaj/circuitgame2-core?rev=053dad3a5f93eb44a60de08959d528056e744185#053dad3a5f93eb44a60de08959d528056e744185"
 dependencies = [
  "vstd",
 ]
