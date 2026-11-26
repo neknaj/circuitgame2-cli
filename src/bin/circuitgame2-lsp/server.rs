@@ -25,7 +25,7 @@ use lsp_types::{
 
 use super::{
     completion, definition,
-    diagnostic::{self, LocalRecovery},
+    diagnostic::{self, LocalRecovery, ReferenceCache},
     inlay_hint, navigation,
     sources::{
         self, DiskSyntaxCache, OpenDocument, ProjectKey, ReferenceInputs, STANDALONE_ID, SourcePaths,
@@ -131,12 +131,15 @@ struct DocumentUpdate {
 // 閉じたプロジェクトの本文を保持せず、開いているプロジェクトの再利用にも上限を設ける。
 const MAX_REFERENCE_PROJECTS: usize = 64;
 const MAX_REFERENCE_INPUT_BYTES: usize = 4 * 1024 * 1024;
+// 型付きの診断は、開いているプロジェクト間で共有する件数の上限まで保持する。
+const MAX_REFERENCE_CACHE_ENTRIES: usize = 1024;
 
 struct ReferenceReport {
     inputs: ReferenceInputs,
     bytes: usize,
     encoding: PositionEncoding,
     diagnostics: Vec<(Uri, lsp_types::Diagnostic)>,
+    absolute: ReferenceCache,
 }
 
 #[derive(Default)]
@@ -667,6 +670,7 @@ impl Server {
         }
         let mut old_reports = std::mem::take(&mut self.reference_reports);
         let mut reference_bytes = 0_usize;
+        let mut reference_entries = 0_usize;
         for (project, (paths, documents)) in groups {
             let open = self
                 .documents
@@ -680,15 +684,21 @@ impl Server {
             // Core の再計算を省いた場合も、設定とディスクの本文を公開直前に照合する。
             if let Ok(snapshot) = SourceSet::load_group(project, paths, &documents, open) {
                 let members = || documents.iter().map(|(id, doc)| (doc.uri, id.as_str()));
-                if let Some((key, cached)) = previous.filter(|(_, entry)| {
+                if previous.as_ref().is_some_and(|(_, entry)| {
                     entry.encoding == encoding && snapshot.matches_reference_inputs(&entry.inputs)
                 }) {
+                    let (key, mut cached) = previous.unwrap();
                     if snapshot.still_current(members()) {
                         merge_reference_reports(&mut reports, cached.diagnostics.iter().cloned());
                         let bytes = reference_bytes.saturating_add(cached.bytes);
                         if self.reference_reports.len() < MAX_REFERENCE_PROJECTS
                             && bytes <= MAX_REFERENCE_INPUT_BYTES
                         {
+                            let remaining = MAX_REFERENCE_CACHE_ENTRIES - reference_entries;
+                            while cached.absolute.len() > remaining {
+                                cached.absolute.pop_last();
+                            }
+                            reference_entries += cached.absolute.len();
                             self.reference_reports.insert(key, cached);
                             reference_bytes = bytes;
                         }
@@ -696,16 +706,24 @@ impl Server {
                 } else if let Ok((project, staged)) =
                     snapshot.parse_strict_recording_disk_indexes(&self.disk_syntax)
                 {
-                    let references = diagnostic::collect_references(&project, &snapshot, encoding);
+                    let bytes = snapshot.reference_input_bytes();
+                    let total = reference_bytes.saturating_add(bytes);
+                    let retain = self.reference_reports.len() < MAX_REFERENCE_PROJECTS
+                        && total <= MAX_REFERENCE_INPUT_BYTES;
+                    let limit = if retain {
+                        MAX_REFERENCE_CACHE_ENTRIES - reference_entries
+                    } else {
+                        0
+                    };
+                    let old = previous.map(|(_, entry)| entry.absolute).unwrap_or_default();
+                    let (references, absolute) =
+                        diagnostic::refresh_references(&project, &snapshot, encoding, old, limit);
                     if snapshot.still_current(members()) {
                         self.disk_syntax.extend(staged);
-                        let bytes = snapshot.reference_input_bytes();
-                        let total = reference_bytes.saturating_add(bytes);
-                        if self.reference_reports.len() < MAX_REFERENCE_PROJECTS
-                            && total <= MAX_REFERENCE_INPUT_BYTES
-                        {
+                        if retain {
                             merge_reference_reports(&mut reports, references.iter().cloned());
                             if let Some((key, inputs)) = snapshot.into_reference_inputs() {
+                                reference_entries += absolute.len();
                                 self.reference_reports.insert(
                                     key,
                                     ReferenceReport {
@@ -713,6 +731,7 @@ impl Server {
                                         bytes,
                                         encoding,
                                         diagnostics: references,
+                                        absolute,
                                     },
                                 );
                                 reference_bytes = total;

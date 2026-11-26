@@ -4,10 +4,6 @@ use std::ops::Range;
 
 use circuitgame2_core::{
     editor::{LineIndex, PositionEncoding, TextPosition},
-    project::{
-        DefinitionBatchError, DefinitionReferenceReason, LocatedName, check_use_aliases,
-        index_use_targets, validate_circuit_basis,
-    },
     syntax::{
         ErrorKind, Repair,
         circuit::{
@@ -22,12 +18,12 @@ use lsp_types::{
 };
 use serde_json::json;
 
-use super::sources::SourceSet;
-
 mod local;
 mod meta;
+mod references;
 pub(super) use local::LocalRecovery;
 pub(super) use meta::render_meta_recovery;
+pub(super) use references::{ReferenceCache, collect_references, refresh_references};
 
 #[derive(Clone)]
 struct Report {
@@ -113,112 +109,6 @@ fn render(
             })
         })
         .collect()
-}
-
-/// 同じソース集合の構文、宣言、別名を確定できたときに参照診断を返す。
-pub(super) fn collect_references(
-    project: &circuitgame2_core::project::CircuitProject<'_>,
-    sources: &SourceSet<'_>,
-    encoding: PositionEncoding,
-) -> Vec<(Uri, Diagnostic)> {
-    if validate_circuit_basis(project).is_err() {
-        return Vec::new();
-    }
-    let Ok(targets) = index_use_targets(project) else {
-        return Vec::new();
-    };
-    let Ok(scope) = check_use_aliases(&targets) else {
-        return Vec::new();
-    };
-    let resolved = scope.resolve_definitions_with_diagnostics();
-    resolved
-        .diagnostics
-        .into_iter()
-        .filter_map(|item| reference_diagnostic(item, sources, encoding))
-        .collect()
-}
-
-fn reference_diagnostic(
-    item: DefinitionBatchError<'_, '_>,
-    sources: &SourceSet<'_>,
-    encoding: PositionEncoding,
-) -> Option<(Uri, Diagnostic)> {
-    let name = item.site.name.word;
-    let span = item.site.name.span;
-    let primary = sources.location(
-        LocatedName {
-            source: item.site.source,
-            span: span.clone(),
-        },
-        encoding,
-    )?;
-    let (code, message, related) = match item.reason {
-        DefinitionReferenceReason::Missing => (
-            "MissingReference",
-            format!("「{name}」の宣言が見つからない。"),
-            None,
-        ),
-        DefinitionReferenceReason::MissingPrefix => (
-            "MissingReferencePrefix",
-            format!("「{name}」の先頭の名前を、このスコープで解決できない。"),
-            None,
-        ),
-        DefinitionReferenceReason::DeclarationPrefix { source, form } => (
-            "ExpectedNamespacePrefix",
-            format!("「{name}」の先頭には名前空間が必要。"),
-            Some((
-                LocatedName {
-                    source,
-                    span: form.name.span.clone(),
-                },
-                "先頭の名前が指す宣言",
-            )),
-        ),
-        DefinitionReferenceReason::Private(location) => (
-            "PrivateReference",
-            format!("「{name}」は参照元の名前空間に公開されていない。"),
-            Some((location, "非公開の宣言")),
-        ),
-        DefinitionReferenceReason::Namespace(location) => (
-            "ExpectedDeclaration",
-            format!("「{name}」の位置には宣言名が必要。"),
-            Some((location, "参照先の名前空間")),
-        ),
-        DefinitionReferenceReason::WrongDeclaration { source, form } => (
-            "WrongDeclarationKind",
-            format!(
-                "「{name}」は、この位置では使えない {} の宣言を指している。",
-                head_name(form.head)
-            ),
-            Some((
-                LocatedName {
-                    source,
-                    span: form.name.span.clone(),
-                },
-                "参照先の宣言",
-            )),
-        ),
-    };
-    let related_information = related.and_then(|(position, label)| {
-        let location = sources.location(position, encoding)?;
-        Some(vec![DiagnosticRelatedInformation {
-            location,
-            message: label.to_owned(),
-        }])
-    });
-    Some((
-        primary.uri,
-        Diagnostic {
-            range: primary.range,
-            severity: Some(DiagnosticSeverity::ERROR),
-            source: Some("NCG2".to_owned()),
-            code: Some(NumberOrString::String(code.to_owned())),
-            message,
-            related_information,
-            data: Some(json!({ "byteStart": span.start, "byteEnd": span.end })),
-            ..Diagnostic::default()
-        },
-    ))
 }
 
 pub(super) fn wire_range(
