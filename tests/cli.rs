@@ -1376,6 +1376,121 @@ fn project_source_diagnostics_show_the_settings_location() {
     assert!(error.contains("回路側の定義 local.ncg2 ["), "{error}");
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn run_resumes_read_first_ram_from_an_explicit_saved_tick() {
+    let folder = tempfile::tempdir().unwrap();
+    let dir = folder.path();
+    let settings = dir.join("circuitgame2.toml");
+    let source = dir.join("main.ncg2");
+    fs::write(
+        &settings,
+        include_bytes!("../examples/vram/circuitgame2.toml"),
+    )
+    .unwrap();
+    fs::write(&source, include_bytes!("../examples/vram/main.ncg2")).unwrap();
+    let snapshot = dir.join("state.bin");
+    let corrupt = dir.join("truncated.bin");
+    let run = |more: &[&str]| {
+        let mut args = vec![
+            "run",
+            "--project",
+            settings.to_str().unwrap(),
+            "--vram",
+            "screen",
+        ];
+        args.extend_from_slice(more);
+        cli(&args)
+    };
+    let saved = snapshot.to_str().unwrap();
+
+    let continuous = run(&["--input", "1101", "--input", "1000", "--input", "0011"]);
+    assert!(continuous.status.success(), "{continuous:?}");
+    let first = run(&["--input", "1101", "--save-at", "1", saved]);
+    assert!(first.status.success(), "{first:?}");
+    let contents = fs::read(&snapshot).unwrap();
+    assert!(!contents.is_empty());
+    let resumed = run(&["--restore", saved, "--input", "1000", "--input", "0011"]);
+    assert!(resumed.status.success(), "{resumed:?}");
+    let continuous = String::from_utf8(continuous.stdout).unwrap();
+    let resumed = String::from_utf8(resumed.stdout).unwrap();
+    assert_eq!(
+        resumed.lines().collect::<Vec<_>>(),
+        continuous.lines().skip(1).collect::<Vec<_>>()
+    );
+    assert_eq!(resumed.lines().next(), Some("1 00 0010"));
+
+    fs::write(&corrupt, &contents[..contents.len() / 2]).unwrap();
+    let oversized = dir.join("oversized.bin");
+    let mut extra = contents.clone();
+    extra.push(0);
+    fs::write(&oversized, extra).unwrap();
+    for options in [
+        &[
+            "--restore",
+            corrupt.to_str().unwrap(),
+            "--save-at",
+            "0",
+            saved,
+        ][..],
+        &["--restore", oversized.to_str().unwrap()][..],
+        &["--restore", saved, "--save-at", "0", saved][..],
+        &["--input", "1000", "--save-at", "2", saved][..],
+    ] {
+        let failed = run(options);
+        assert_eq!(failed.status.code(), Some(1), "{failed:?}");
+        assert!(failed.stdout.is_empty(), "{failed:?}");
+        assert_eq!(fs::read(&snapshot).unwrap(), contents);
+    }
+
+    let original_config = include_str!("../examples/vram/circuitgame2.toml");
+    fs::write(
+        &settings,
+        format!("tick-ns = {{ numerator = 1, denominator = 1 }}\n{original_config}"),
+    )
+    .unwrap();
+    let wrong_period = run(&["--restore", saved]);
+    assert_eq!(wrong_period.status.code(), Some(1), "{wrong_period:?}");
+    assert!(wrong_period.stdout.is_empty(), "{wrong_period:?}");
+    assert!(
+        String::from_utf8(wrong_period.stderr)
+            .unwrap()
+            .contains("今回の実行設定と異なる")
+    );
+    fs::write(&settings, original_config).unwrap();
+
+    let original_circuit = include_str!("../examples/vram/main.ncg2");
+    let other_circuit = original_circuit.replace(
+        "(bank address data write-enable)",
+        "(bank address data address)",
+    );
+    assert_ne!(other_circuit, original_circuit);
+    fs::write(&source, other_circuit).unwrap();
+    let wrong_layout = run(&["--restore", saved]);
+    assert_eq!(wrong_layout.status.code(), Some(1), "{wrong_layout:?}");
+    assert!(wrong_layout.stdout.is_empty(), "{wrong_layout:?}");
+    assert!(
+        String::from_utf8(wrong_layout.stderr)
+            .unwrap()
+            .contains("復元先の回路と異なる")
+    );
+    fs::write(&source, original_circuit).unwrap();
+
+    let trailing_dot = format!("{saved}/.");
+    let failed = run(&["--save-at", "0", &trailing_dot]);
+    assert_eq!(failed.status.code(), Some(1), "{failed:?}");
+    assert!(failed.stdout.is_empty(), "{failed:?}");
+    assert_eq!(fs::read(&snapshot).unwrap(), contents);
+
+    let failed = run(&["--save-at", "0", source.to_str().unwrap()]);
+    assert_eq!(failed.status.code(), Some(1), "{failed:?}");
+    assert!(failed.stdout.is_empty(), "{failed:?}");
+    assert_eq!(
+        fs::read(source).unwrap(),
+        include_bytes!("../examples/vram/main.ncg2")
+    );
+}
+
 #[test]
 fn project_vram_reports_committed_memory_after_each_tick() {
     let project = "examples/vram/circuitgame2.toml";
