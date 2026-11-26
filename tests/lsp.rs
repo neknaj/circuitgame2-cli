@@ -978,6 +978,45 @@ fn inlay_hints_count_functions_and_modules_without_a_settling_bound() {
 }
 
 #[test]
+fn inlay_hints_respect_the_project_state_capacity() {
+    let project = tempfile::tempdir().unwrap();
+    let source = "(using nor)\n(memory bank (address 8) (data (bits 64)))\n\
+        (module main (in (address (bits 8))) (out (value (bits 64)))\n\
+          (def value (bank address #x0000000000000000 0)))\n";
+    let file = project.path().join("main.ncg2");
+    std::fs::write(&file, source).unwrap();
+    let uri = Url::from_file_path(file).unwrap();
+    for (limit, expected) in [(128, 0), (32_768, 1)] {
+        std::fs::write(
+            project.path().join("circuitgame2.toml"),
+            format!("sources = ['main.ncg2']\nstate-bits = {limit}\n"),
+        )
+        .unwrap();
+        let responses = exchange([
+            request(1, "initialize", json!({"capabilities": {}})),
+            notification("initialized", json!({})),
+            notification(
+                "textDocument/didOpen",
+                json!({"textDocument": {
+                    "uri": uri.as_str(), "languageId": "ncg2", "version": 1, "text": source
+                }}),
+            ),
+            request(
+                2,
+                "textDocument/inlayHint",
+                json!({"textDocument": {"uri": uri.as_str()}, "range": {
+                    "start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 24}
+                }}),
+            ),
+            request(3, "shutdown", Value::Null),
+            notification("exit", Value::Null),
+        ]);
+        let response = responses.iter().find(|message| message["id"] == 2).unwrap();
+        assert_eq!(response["result"].as_array().unwrap().len(), expected);
+    }
+}
+
+#[test]
 fn inlay_hint_refreshes_when_an_open_dependency_changes() {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/project");
     let basis = Url::from_file_path(project.join("basis.ncg2")).unwrap();

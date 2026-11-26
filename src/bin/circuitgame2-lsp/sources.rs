@@ -125,6 +125,7 @@ pub(super) struct ProjectKey {
     root: PathBuf,
     ids: Vec<String>,
     settings: Vec<u8>,
+    state_bits: usize,
 }
 
 pub(super) struct ConfiguredSources {
@@ -132,6 +133,7 @@ pub(super) struct ConfiguredSources {
     paths: SourcePaths,
     root: PathBuf,
     settings: Vec<u8>,
+    state_bits: usize,
 }
 
 impl ConfiguredSources {
@@ -146,6 +148,7 @@ impl ConfiguredSources {
             root: project_root(&self.root),
             ids: self.paths.iter().map(|(id, _)| id.clone()).collect(),
             settings: self.settings.clone(),
+            state_bits: self.state_bits,
         }
     }
 }
@@ -245,6 +248,15 @@ impl<'a> SourceSet<'a> {
     /// 解析に使う文書の URI を返す。
     pub(super) fn uris(&self) -> impl Iterator<Item = &Uri> {
         self.sources.iter().map(|source| &source.uri)
+    }
+
+    /// 同じスナップショットの設定に記された順序回路の状態容量。
+    pub(super) fn state_bits(&self) -> usize {
+        self.project
+            .as_ref()
+            .map_or(circuitgame2_project_config::DEFAULT_STATE_BITS, |project| {
+                project.state_bits
+            })
     }
 
     /// Core に渡す本文と版を、識別子に対応させる。
@@ -640,6 +652,7 @@ fn configured_sources(file: &Path) -> Result<Option<ConfiguredSources>, String> 
         return Ok(None);
     };
     let (settings, settings_bytes) = config::read_settings_snapshot(&manifest)?;
+    let state_bits = settings.simulation_state_bits();
     let mut seen = BTreeSet::new();
     let mut paths = Vec::new();
     let mut current_id = None;
@@ -687,6 +700,7 @@ fn configured_sources(file: &Path) -> Result<Option<ConfiguredSources>, String> 
         paths,
         root: root.to_path_buf(),
         settings: settings_bytes,
+        state_bits,
     }))
 }
 

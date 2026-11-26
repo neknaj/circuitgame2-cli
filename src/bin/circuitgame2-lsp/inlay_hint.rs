@@ -81,6 +81,10 @@ fn analyze(
         return Vec::new();
     };
     let mut hints = Vec::new();
+    let limits = circuitgame2_core::project::ClockedModuleVmLimits {
+        state_bits: sources.state_bits(),
+        ..CLOCKED_LIMITS
+    };
     let circuit = &project.circuits()[file];
     for (name, form) in circuit.names.iter().enumerate() {
         let offset = form.name.span.end;
@@ -101,8 +105,7 @@ fn analyze(
                 (function.netlist().gates.len(), None)
             }
             Head::Module => {
-                let Ok(Some(hint)) = aliases.module_expansion_hint(file, name, CLOCKED_LIMITS)
-                else {
+                let Ok(Some(hint)) = aliases.module_expansion_hint(file, name, limits) else {
                     continue;
                 };
                 (hint.nor_gates, hint.settling_ticks)

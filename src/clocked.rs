@@ -3,7 +3,8 @@
 use std::{io::Write, path::Path};
 
 use circuitgame2_core::project::{
-    CircuitProject, ClockedVramVm, ModuleBodyPosition, UseAliases, VramDeclaration, VramSetupError,
+    CircuitProject, ClockedModuleVmLimits, ClockedVramVm, ModuleBodyPosition, UseAliases,
+    VramDeclaration, VramSetupError,
 };
 
 use super::{config, diagnostic, format_bits, input_bits, output_error, validate_input};
@@ -16,6 +17,7 @@ pub(super) struct TraceOptions<'a> {
     pub(super) frames: InputFrames<'a>,
     pub(super) vram: &'a [&'a str],
     pub(super) settings: Option<(&'a Path, &'a config::ProjectConfig)>,
+    pub(super) limits: ClockedModuleVmLimits,
 }
 
 /// tick ごとに与える入力。空入力を繰り返す場合は回数だけを保持する。
@@ -39,6 +41,7 @@ pub(super) fn trace(
         frames,
         vram,
         settings,
+        limits,
     } = options;
     let declared = settings.map_or(&[][..], |(_, config)| config.vram.as_slice());
     let declarations: Vec<_> = declared
@@ -49,7 +52,7 @@ pub(super) fn trace(
         })
         .collect();
     let mut compiled = aliases
-        .lower_clocked_vram(position, LIMITS, &declarations)
+        .lower_clocked_vram(position, limits, &declarations)
         .map_err(|error| match error {
             VramSetupError::Circuit(error) => {
                 let message = diagnostic::clocked::error(project, position, name, error);

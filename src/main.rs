@@ -824,8 +824,9 @@ fn execute(
         .map(|()| ExitCode::SUCCESS);
     }
 
+    let limits = circuitgame2_cli::clocked_limits(settings.as_ref().map(|(_, settings)| settings));
     if let Command::NorCount { entry, .. } = command {
-        return nor_count::write(&project, aliases, entry, &source_diagnostic, stdout)
+        return nor_count::write(&project, aliases, entry, limits, &source_diagnostic, stdout)
             .map(|()| ExitCode::SUCCESS);
     }
 
@@ -869,6 +870,7 @@ fn execute(
                 frames,
                 vram: &vram,
                 settings: settings.as_ref().map(|(path, settings)| (*path, settings)),
+                limits,
             },
             stdout,
         )
@@ -881,6 +883,7 @@ fn execute(
             ModuleBodyPosition { file, entry },
             name,
             condition,
+            limits,
             &source_diagnostic,
             stdout,
         );
